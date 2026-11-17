@@ -285,7 +285,7 @@ folders. The CLI also exposes it as `pdfcraft-cli batch`. See the
 ## Optional AI assistant
 
 `ai_preview` extracts bounded page text without a provider request. `ai_summary`, `ai_ask`,
-`ai_translate` and `ai_provider_test` require explicit send consent and launcher-configured
+`ai_translate`, `ai_chat` and `ai_provider_test` require explicit send consent and launcher-configured
 provider settings. See [setup, privacy and examples](../../docs/ai-assistant.md).
 
 ## Editing button export values

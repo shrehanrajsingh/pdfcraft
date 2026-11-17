@@ -8,6 +8,7 @@ use crate::theme::{self, Tokens};
 pub(super) mod icon_data;
 pub mod icons;
 pub(crate) mod markdown;
+mod math;
 
 /// Horizontal and vertical inset of a single-line field.
 const FIELD_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);

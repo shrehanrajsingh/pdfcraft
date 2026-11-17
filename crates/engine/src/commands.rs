@@ -388,6 +388,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     c("ai.translate", "Translate with AI…", None, None, Nothing, "languages"),
     c("ai.preview", "Preview text for AI", None, None, Copying, "file-text"),
     c("ai.send", "Send reviewed text to AI", None, None, Copying, "sparkles"),
+    c("ai.new", "New AI conversation", None, None, Nothing, "message-square-plus"),
     c("ai.test", "Test AI connection", None, None, Nothing, "settings"),
     c("tools.js_console", "JavaScript console…", None, Some(Shortcut::cmd("J")), Document, "square-terminal"),
     c("tools.document_js", "Document JavaScripts…", None, None, Modification, "file-code"),

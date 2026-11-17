@@ -57,4 +57,26 @@ fn ai_preview_extracts_text_and_network_tools_need_explicit_consent() {
     assert!(off.contains("AI assistant is off"), "{off}");
     let test_denied = a.call("ai_provider_test", &json!({})).unwrap_err().to_string();
     assert!(test_denied.contains("allow_send"), "{test_denied}");
+    let chat_denied = a.call("ai_chat", &json!({"doc":doc,"messages":[{"role":"user","content":"Say more"}]})).unwrap_err().to_string();
+    assert!(chat_denied.contains("allow_send"), "{chat_denied}");
+    let chat_off = a
+        .call("ai_chat", &json!({"doc":doc,"task":"summary","messages":[{"role":"user","content":"Say more"}],"allow_send":true}))
+        .unwrap_err()
+        .to_string();
+    assert!(chat_off.contains("AI assistant is off"), "{chat_off}");
+    std::fs::write(dir.join("not-an-image.txt"), b"hello").unwrap();
+    let bad_image = a
+        .call(
+            "ai_chat",
+            &json!({
+                "doc": doc,
+                "task": "ask",
+                "input": "What is this?",
+                "messages": [{"role":"user","content":"What colour?","images":["not-an-image.txt"]}],
+                "allow_send": true
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(bad_image.contains("image") || bad_image.contains("AI assistant is off"), "{bad_image}");
 }

@@ -517,22 +517,30 @@ fn ai_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
     egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin { left: 14, right: 12, top: 12, bottom: 8 }).stroke(Stroke::new(1.0, t.divider)).show(
         ui,
         |ui| {
+            // Fill the inspector so the page cannot show through unused space.
+            let size = ui.available_size();
+            if size.x.is_finite() && size.y.is_finite() {
+                ui.set_min_size(size);
+            }
+            ui.set_clip_rect(ui.max_rect());
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(tl!("AI assistant")).font(theme::semibold(15.5)));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if icons::button(ui, "x", 26.0, false, tl!("Close")).clicked() {
                         close = true;
                     }
-                    let settings_on = app.ai.settings_open || !app.ai.config.enabled;
+                    let settings_on = app.ai.showing_settings();
                     if icons::button(ui, "settings", 26.0, settings_on, tl!("Provider settings")).clicked() {
                         app.ai.settings_open = !app.ai.settings_open;
+                    }
+                    if !settings_on && app.ai.has_thread() && icons::button(ui, "message-square-plus", 26.0, false, tl!("New conversation")).clicked()
+                    {
+                        app.ai.reset_thread();
                     }
                 });
             });
             ui.add_space(6.0);
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                crate::ai_ui::body(ui, app);
-            });
+            crate::ai_ui::body(ui, app);
         },
     );
     if close {

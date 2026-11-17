@@ -52,6 +52,16 @@ base64 = "0.23"
 unicode-bidi = "0.3"
 # CommonMark events for the AI answer viewer (no HTML backend).
 pulldown-cmark = { workspace = true }
+# GFM tables, headings, lists, and math delimiters for AI answers. Image loading and
+# HTTP fetch stay off so model markdown cannot pull files or the network.
+egui_commonmark = { version = "0.26.0", default-features = false, features = ["pulldown_cmark"] }
+# KaTeX-compatible TeX parse/layout/PNG (embedded OFL KaTeX faces; no system fonts).
+ratex-parser = "=0.1.16"
+ratex-layout = "=0.1.16"
+ratex-types = "=0.1.16"
+ratex-render = { version = "=0.1.16", features = ["embed-fonts"] }
+# Decode RaTeX PNG rasters into egui ColorImage.
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Checks that an installed fallback font parses and has the glyphs, and reads the vertical metrics
 # that put fallback faces on the interface's baseline (#1676); the same skrifa egui uses.
 skrifa = "0.44"
@@ -103,7 +113,7 @@ egui_kittest = { workspace = true, features = ["eframe", "wgpu"] }
 # Tests draw PdfCraft text without a system provider: the bundled and monochrome emoji faces must
 # be enabled on the test graph itself (a dependency's dev-features do not propagate).
 egui = { workspace = true, features = ["default_fonts", "monochrome_emoji_fonts"] }
-image = { version = "0.25", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Glyph-coverage test of the interface fonts; the same skrifa pdfcraft-fonts already uses.
 skrifa = "0.44"
 proptest = { workspace = true }

@@ -70,6 +70,11 @@ ignore = [
 crate = "epaint_default_fonts"
 allow = ["OFL-1.1", "Ubuntu-font-1.0"]
 
+# KaTeX faces bundled by RaTeX for on-screen AI TeX (OFL-1.1, ATTRIBUTION.toml [[bundled]]).
+[[licenses.exceptions]]
+crate = "ratex-katex-fonts"
+allow = ["OFL-1.1"]
+
 # winprint (craft-print's Windows spooler, #1107) lists reqwest as a build-dependency for its
 # PDFium download, which only runs with its `pdfium` feature; craft-print turns that off. The CA
 # bundle reqwest brings is CDLA-Permissive-2.0 data and is compiled into winprint's build script

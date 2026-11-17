@@ -37,6 +37,8 @@ list (author, source, license) is in ATTRIBUTION.md.
 - lopdf (bootstrap document inspection, via crates.io) — MIT.
 - egui default fonts (epaint_default_fonts, via eframe) — Ubuntu Light (Ubuntu Font Licence 1.0),
   Hack (MIT / Bitstream Vera licence), Noto Emoji (SIL OFL 1.1), emoji-icon-font (MIT).
+- KaTeX typefaces (ratex-katex-fonts, via RaTeX) — SIL Open Font License 1.1. Used only to rasterize
+  TeX in AI answers on screen; they are not written into PDFs. See fonts/OFL.txt in that crate.
 - Colour profile in hayro-interpret — CGATS001Compat-v2-micro.icc (CC0-1.0, Clinton Ingram).
 - ICU4X line-breaking data (icu_segmenter_data, via crates.io) — Unicode-3.0. Its Thai, Lao, Khmer
   and Burmese word dictionaries are compiled in for wrapping Thai text; notice below, full licence in

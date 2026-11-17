@@ -214,4 +214,79 @@ mod http {
         assert!(request.contains("\"max_tokens\""));
         assert!(!request.contains("max_completion_tokens"));
     }
+
+    #[test]
+    fn ai_conversation_is_bounded_and_keeps_page_context() {
+        let prepared = Prepared { text: "[Page 3]\nSynthetic document".into(), pages: vec![3] };
+        let first = prepared.conversation_messages(Task::Summary, "", &[], &[]).unwrap();
+        assert_eq!(first[0].role, "system");
+        assert!(first[0].text.contains("untrusted data"));
+        assert!(first[0].images.is_empty());
+        assert_eq!(first[1].role, "user");
+        assert!(first[1].text.contains("[Page 3]"));
+        let follow = vec![
+            Turn { role: Role::Assistant, text: "A short summary [Page 3].".into(), images: Vec::new() },
+            Turn { role: Role::User, text: "What about revenue?".into(), images: Vec::new() },
+        ];
+        let messages = prepared.conversation_messages(Task::Summary, "", &follow, &[]).unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[2].role, "assistant");
+        assert!(messages[2].text.contains("A short summary"));
+        assert_eq!(messages[3].text, "What about revenue?");
+        let too_many: Vec<Turn> = (0..=MAX_TURNS)
+            .map(|i| Turn { role: if i % 2 == 0 { Role::Assistant } else { Role::User }, text: "x".into(), images: Vec::new() })
+            .collect();
+        let err = prepared.conversation_messages(Task::Summary, "", &too_many, &[]).unwrap_err();
+        assert!(err.contains("too long"), "{err}");
+        let huge = vec![Turn { role: Role::User, text: "é".repeat(MAX_HISTORY_BYTES + 1), images: Vec::new() }];
+        assert!(prepared.conversation_messages(Task::Summary, "", &huge, &[]).is_err());
+        let not_user = vec![Turn { role: Role::Assistant, text: "only a reply".into(), images: Vec::new() }];
+        assert!(prepared.conversation_messages(Task::Summary, "", &not_user, &[]).unwrap_err().contains("last message"));
+        let image = ChatImage::from_rgba(2, 2, &[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255]).unwrap();
+        let pictured = vec![Turn { role: Role::User, text: String::new(), images: vec![image.clone()] }];
+        let with_image = prepared.conversation_messages(Task::Ask, "What is this?", &pictured, &[]).unwrap();
+        assert_eq!(with_image.last().map(|m| m.images.len()), Some(1));
+        let snapshot = prepared.conversation_messages(Task::Summary, "", &[], std::slice::from_ref(&image)).unwrap();
+        assert_eq!(snapshot[1].images.len(), 1);
+    }
+
+    #[test]
+    fn ai_follow_up_http_sends_prior_turns_and_page_markers() {
+        let (config, worker) = server("200 OK", r#"{"choices":[{"finish_reason":"stop","message":{"content":"Revenue is ten [Page 3]."}}]}"#, "");
+        let mut provider = OpenAiProvider::new(config, "synthetic-api-key".into()).unwrap();
+        let prepared = Prepared { text: "[Page 3]\nSynthetic document".into(), pages: vec![3] };
+        let turns = vec![
+            Turn { role: Role::Assistant, text: "A short summary [Page 3].".into(), images: Vec::new() },
+            Turn { role: Role::User, text: "What about revenue?".into(), images: Vec::new() },
+        ];
+        assert_eq!(prepared.complete_conversation(&mut provider, Task::Summary, "", &turns, &[]).unwrap(), "Revenue is ten [Page 3].");
+        let request = worker.join().unwrap();
+        let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        assert!(messages.len() > 1, "{messages:?}");
+        assert_eq!(messages[0]["role"], "system");
+        assert!(messages[1]["content"].as_str().unwrap().contains("[Page 3]"));
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["content"], "A short summary [Page 3].");
+        assert_eq!(messages[3]["content"], "What about revenue?");
+        assert!(!request.contains("synthetic-api-key") || request.to_lowercase().contains("authorization: bearer synthetic-api-key"));
+    }
+
+    #[test]
+    fn ai_follow_up_http_sends_image_data_urls() {
+        let (config, worker) = server("200 OK", r#"{"choices":[{"finish_reason":"stop","message":{"content":"A red square."}}]}"#, "");
+        let mut provider = OpenAiProvider::new(config, String::new()).unwrap();
+        let prepared = Prepared { text: "[Page 1]\nSynthetic document".into(), pages: vec![1] };
+        let image = ChatImage::from_rgba(2, 2, &[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255]).unwrap();
+        let turns = vec![Turn { role: Role::User, text: "What colour?".into(), images: vec![image] }];
+        assert_eq!(prepared.complete_conversation(&mut provider, Task::Ask, "What colour?", &turns, &[]).unwrap(), "A red square.");
+        let request = worker.join().unwrap();
+        let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        let content = body["messages"].as_array().unwrap().last().unwrap()["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "What colour?");
+        let url = content[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"), "{url}");
+        assert!(body["messages"][1]["content"].as_str().unwrap().contains("[Page 1]"));
+    }
 }

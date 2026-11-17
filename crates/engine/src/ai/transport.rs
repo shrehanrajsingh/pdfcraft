@@ -1,4 +1,5 @@
-use super::Config;
+use super::{ChatMessage, Config};
+use base64::Engine as _;
 use craft_ai::{AiError, GenOpts, Provider, ProviderInfo};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
@@ -97,19 +98,12 @@ fn network_error(_: ureq::Error) -> AiError {
     AiError::Http("connection failed or timed out; check the URL, network, and TLS certificate".into())
 }
 
-impl Provider for OpenAiProvider {
-    fn name(&self) -> String {
-        "OpenAI-compatible".into()
-    }
-
-    fn complete(&mut self, prompt: &str, opts: &GenOpts) -> Result<String, AiError> {
+impl OpenAiProvider {
+    fn post_completion(&mut self, messages: Vec<Value>, opts: &GenOpts) -> Result<String, AiError> {
         if let Err(e) = self.config.require_model() {
             return Err(AiError::Rejected(e));
         }
-        if prompt.len() > super::MAX_TEXT_BYTES + super::MAX_PROMPT_BYTES + 2048 {
-            return Err(AiError::Rejected("request exceeds the text limit".into()));
-        }
-        let mut body = json!({"model": self.config.model.trim(), "messages": [{"role": "user", "content": prompt}], "stream": false});
+        let mut body = json!({"model": self.config.model.trim(), "messages": messages, "stream": false});
         // Omitting temperature supports reasoning models which reject sampler parameters.
         let limit = if self.config.legacy_max_tokens { "max_tokens" } else { "max_completion_tokens" };
         body[limit] = json!(opts.max_tokens.clamp(1, 8192));
@@ -119,6 +113,56 @@ impl Provider for OpenAiProvider {
         }
         let response = req.send_json(body).map_err(network_error)?;
         self.answer(self.response(response, false)?)
+    }
+
+    /// Multi-turn `/chat/completions` body. Document text belongs in the first user message.
+    /// Pictures use OpenAI vision `image_url` data URLs only when a turn has them, so text-only
+    /// servers keep a string `content`.
+    pub fn complete_chat(&mut self, messages: &[ChatMessage]) -> Result<String, AiError> {
+        let mut total = 0usize;
+        for message in messages {
+            if !matches!(message.role.as_str(), "system" | "user" | "assistant") {
+                return Err(AiError::Rejected("conversation messages must use system, user, or assistant roles".into()));
+            }
+            total = total.saturating_add(message.text.len());
+            for image in &message.images {
+                total = total.saturating_add(image.bytes().len().saturating_mul(2));
+            }
+        }
+        let image_budget = super::MAX_CHAT_IMAGES.saturating_mul(super::MAX_CHAT_IMAGE_BYTES.saturating_mul(2));
+        if messages.is_empty() || total > super::MAX_TEXT_BYTES + super::MAX_HISTORY_BYTES + 2048 + image_budget {
+            return Err(AiError::Rejected("request exceeds the text limit".into()));
+        }
+        let payload = messages.iter().map(message_json).collect::<Result<Vec<_>, _>>()?;
+        self.post_completion(payload, &GenOpts::default())
+    }
+}
+
+fn message_json(message: &ChatMessage) -> Result<Value, AiError> {
+    if message.images.is_empty() {
+        return Ok(json!({"role": message.role, "content": message.text}));
+    }
+    let mut parts = vec![json!({"type": "text", "text": message.text})];
+    for image in &message.images {
+        if image.bytes().len() > super::MAX_CHAT_IMAGE_BYTES {
+            return Err(AiError::Rejected("an attached image exceeds the size limit".into()));
+        }
+        let url = format!("data:{};base64,{}", image.mime(), base64::engine::general_purpose::STANDARD.encode(image.bytes()));
+        parts.push(json!({"type": "image_url", "image_url": {"url": url}}));
+    }
+    Ok(json!({"role": message.role, "content": parts}))
+}
+
+impl Provider for OpenAiProvider {
+    fn name(&self) -> String {
+        "OpenAI-compatible".into()
+    }
+
+    fn complete(&mut self, prompt: &str, opts: &GenOpts) -> Result<String, AiError> {
+        if prompt.len() > super::MAX_TEXT_BYTES + super::MAX_PROMPT_BYTES + 2048 {
+            return Err(AiError::Rejected("request exceeds the text limit".into()));
+        }
+        self.post_completion(vec![json!({"role": "user", "content": prompt})], opts)
     }
 
     fn test(&mut self) -> Result<ProviderInfo, AiError> {

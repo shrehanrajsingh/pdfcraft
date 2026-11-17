@@ -152,6 +152,20 @@ pub fn tools() -> Vec<ToolDef> {
             .cmd("ai.summary").with(ai_schema()),
         t("ai_ask", "Ask about a document", "Answer input using selected document pages through the explicitly configured AI provider. Requires allow_send=true. Questions and text leave the process. Verify generated citations.")
             .cmd("ai.ask").with(ai_schema()),
+        t("ai_chat", "Continue an AI conversation", "Send a follow-up with prior turns and the same document snapshot to the launcher-configured provider. messages must end with the new user turn. User turns may attach PNG/JPEG (or other still images, re-encoded) via images paths, at most 4 per message and 8 in the conversation. Requires allow_send=true. The assistant never edits the PDF.")
+            .cmd("ai.send").with(schema(json!({
+                "doc": doc(),
+                "pages": pages("to send to AI"),
+                "task": {"type":"string","enum":["summary","ask","translate"],"description":"Original task that started the conversation (default ask)."},
+                "input":{"type":"string","maxLength":8000,"description":"Starter question or translation language from the first turn. Empty for summary."},
+                "images":{"type":"array","maxItems":4,"items": path_arg(), "description":"Pictures sent with the original document snapshot (PNG, JPEG, GIF, TIFF or BMP). Relative to --root when set."},
+                "messages":{"type":"array","minItems":1,"maxItems":24,"description":"Prior assistant/user turns; the last item is the new user message. Document text is prepended by the engine.","items":{"type":"object","properties":{
+                    "role":{"type":"string","enum":["user","assistant"]},
+                    "content":{"type":"string","maxLength":32000},
+                    "images":{"type":"array","maxItems":4,"items": path_arg(), "description":"Image files attached to this user turn."}
+                },"required":["role","content"],"additionalProperties":false}},
+                "allow_send":{"type":"boolean","description":"Explicit permission to send text, images and messages to the configured provider."}
+            }), &["doc", "messages", "allow_send"])),
         t("ai_translate", "Translate document text", "Translate selected pages into the language named in input through the explicitly configured AI provider. Requires allow_send=true. Returns text, without rewriting the PDF.")
             .cmd("ai.translate").with(ai_schema()),
         t("doc_bates_multi", "Add Bates numbering across files", "Apply one consecutive Bates sequence to an ordered list of PDFs. Each file entry has input and output paths and an optional open or permissions password. The operation first validates every input/output and computes inclusive numeric intervals; dry_run returns that allocation without writing. Existing output files are never replaced. On application, files that cannot be edited or saved are reported individually and later files continue.")

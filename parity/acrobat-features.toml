@@ -9842,7 +9842,7 @@ evidence = [
   "crates/engine/src/ai/tests.rs::ai_connection_test_never_sends_document_text_or_empty_auth",
   "crates/engine/src/ai/tests.rs::ai_connection_test_does_not_require_a_model_id",
   "crates/ui-egui/src/ai_ui.rs::ai_settings_never_persist_keys_consent_or_document_text",
-  "crates/ui-egui/src/ai_ui.rs::ai_dialog_has_masked_key_and_explicit_connection_control",
+  "crates/ui-egui/src/ai_ui.rs::ai_panel_has_masked_key_and_explicit_connection_control",
   "apps/pdfcraft-cli/tests/it/ai.rs::ai_cli_round_trip_and_consent_gate",
   "crates/automation/tests/it/ai.rs::ai_preview_extracts_text_and_network_tools_need_explicit_consent",
 ]
@@ -9856,12 +9856,14 @@ tier = "P2"
 milestone = "M13"
 status = "partial"
 commands = ["ai.summary"]
-tools = ["ai_summary"]
+tools = ["ai_summary", "ai_chat"]
 evidence = [
   "crates/engine/src/ai/tests.rs::ai_http_round_trip_uses_bearer_model_and_page_context",
+  "crates/engine/src/ai/tests.rs::ai_conversation_is_bounded_and_keeps_page_context",
+  "crates/engine/src/ai/tests.rs::ai_follow_up_http_sends_prior_turns_and_page_markers",
   "apps/pdfcraft-cli/tests/it/ai.rs::ai_cli_round_trip_and_consent_gate",
 ]
-notes = "Read-only summaries of at most 100 pages / 120000 UTF-8 bytes. No retrieval or conversation history."
+notes = "Read-only summaries of at most 100 pages / 120000 UTF-8 bytes. The UI continues as a session-only chat over that snapshot; CLI one-shot remains ai_summary, follow-ups use ai_chat. No retrieval."
 
 [[feature]]
 id = "misc.ai-ask"
@@ -9870,14 +9872,21 @@ area = "N"
 tier = "P2"
 milestone = "M13"
 status = "partial"
-commands = ["ai.ask"]
-tools = ["ai_ask"]
+commands = ["ai.ask", "ai.new"]
+tools = ["ai_ask", "ai_chat"]
 evidence = [
   "crates/engine/src/ai/tests.rs::ai_http_round_trip_uses_bearer_model_and_page_context",
   "crates/engine/src/ai/tests.rs::ai_refuses_pending_redactions_and_empty_scans",
+  "crates/engine/src/ai/tests.rs::ai_follow_up_http_sends_prior_turns_and_page_markers",
+  "crates/ui-egui/src/ai_ui.rs::ai_chat_surface_hides_provider_fields",
+  "crates/ui-egui/src/ai_ui.rs::ai_chat_pastes_clipboard_images_and_can_remove_them",
+  "crates/ui-egui/src/widgets/markdown.rs::parse_maps_pipe_tables",
+  "crates/ui-egui/src/widgets/markdown.rs::parse_maps_tex_delimiters_and_keeps_page_citations",
+  "crates/ui-egui/src/widgets/math.rs::ratex_renders_frac_to_a_png_raster",
+  "crates/engine/src/ai/tests.rs::ai_follow_up_http_sends_image_data_urls",
   "apps/pdfcraft-cli/tests/it/ai.rs::ai_cli_round_trip_and_consent_gate",
 ]
-notes = "Read-only questions over selected text. Physical page markers are supplied, but generated citations are not independently verified."
+notes = "Read-only questions over selected text, with UI follow-ups over the same snapshot. Paste or attach still images on a user turn (OpenAI vision data URLs). Answers render CommonMark through egui_commonmark (GitHub pipe tables) and TeX through RaTeX ($…$, $$…$$, \\[…\\]). Physical page markers are supplied, but generated citations are not independently verified."
 
 [[feature]]
 id = "misc.ai-conversational-edit"

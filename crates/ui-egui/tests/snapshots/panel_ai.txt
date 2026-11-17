@@ -12,9 +12,3 @@ Label = "Paste the key here. It stays in memory for this session and is never sa
 Button "Clear API key"
 CheckBox "Use legacy max_tokens (older compatible servers)" [off]
 Button "Test connection" [disabled]
-RadioButton "Summarize" [on]
-RadioButton "Ask" [off]
-RadioButton "Translate" [off]
-RadioButton "This page" [off]
-RadioButton "Document" [on]
-Button "Preview" [disabled]

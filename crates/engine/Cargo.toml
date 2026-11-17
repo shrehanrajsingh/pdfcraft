@@ -52,6 +52,7 @@ unicode-segmentation = "1.13"
 craft-ai = { git = "https://github.com/storytold/craft-libs", rev = "185ba5bca308766629655cf9c04c890a2379b8bb" }
 ureq = { version = "3.5", default-features = false, features = ["rustls", "platform-verifier", "json"] }
 zeroize = { workspace = true }
+base64 = "0.23"
 # Already in the graph through lopdf; used only for the local UTC offset ("today"). The workspace
 # entry is std-only; this target adds `clock` for `chrono::Local::now`.
 chrono = { workspace = true, features = ["clock"] }
