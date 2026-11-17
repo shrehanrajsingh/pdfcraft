@@ -198,7 +198,7 @@ Hours are calibrated as in [Effort and calibration](docs/target-app-parity.md#ef
 | Stability | ≈ 50% | 8% | 45–80 | [gaps.md](docs/gaps.md) gap 6 |
 | Platforms | ≈ 70% | 5% | 15–30 | [hardware-parity.md](docs/hardware-parity.md#platforms) |
 | Ecosystem and plug-ins | ≈ 30% | 1% | 10–20 (within features) | [gaps.md](docs/gaps.md) |
-| AI features | ≈ 0% (in scope: local providers) | 1% | 20–40 (within features) | [gaps.md](docs/gaps.md) gap 23 |
+| AI features | ≈ 30% (in scope: OpenAI-compatible BYO key; no local inference) | 1% | 20–40 (within features) | [gaps.md](docs/gaps.md) gap 23 |
 | **Total (weighted sum)** | **≈ 50%** | 100% | **≈ 780–1,400** | |
 
 ## Features

@@ -194,7 +194,7 @@ features total and are shown for orientation; the others add to it.
 | Stability | ≈ 50% | 8% | 45–80 | additional | Never-crash rules and nightly fuzzing; 245 open issues on 2026-10-10, many of them `fix(...)` reports of wrong results in shipped features (the #799–#821 batch is fixed) | [gaps.md](gaps.md) |
 | Platforms | ≈ 70% | 5% | 15–30 | additional | macOS (signed, notarized), Windows x64/x86/ARM64 (signed), Linux (AppImage, deb, rpm, Flatpak), FreeBSD, web (WASM). Acrobat has no Linux, FreeBSD or full web editor; web OCR reads in Web Workers but is far slower than native, and we lack web recovery | [hardware-parity.md](hardware-parity.md) |
 | Ecosystem and plug-ins | ≈ 30% | 1% | 10–20 | within features | No plug-in SDK or folder-level JavaScript; Action Wizard partial. Agent automation (CLI, MCP, UI control channel) has no Acrobat equivalent | [gaps.md](gaps.md) |
-| AI features | ≈ 0% (in scope) | 1% | 20–40 | within features | Acrobat's AI Assistant is cloud-only (out of scope). Local, opt-in provider interface (`misc.ai-provider`) not started | [gaps.md](gaps.md) |
+| AI features | ≈ 30% (in scope) | 1% | 20–40 | within features | Acrobat's AI Assistant is cloud-only (out of scope). Opt-in OpenAI-compatible provider (`misc.ai-provider`) is partial: session-only API key, preview/send, no local inference | [gaps.md](gaps.md) |
 | **Total (weighted sum)** | **≈ 50%** | 100% | **≈ 780–1,400** | | | |
 
 ## By feature area

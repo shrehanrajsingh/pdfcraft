@@ -199,12 +199,22 @@ impl PdfCraftApp {
         v["print"] = print;
         // Each printer's paper, sizing and two-sided choice, the one printed to last first (#2001).
         v["print_printers"] = crate::print_ui::setups_to_json(&self.print_draft.setups);
+        // Credentials, prompts, extracted text and answers never enter preferences.
+        if self.ai.config.should_persist() {
+            v["ai_provider"] = serde_json::json!(self.ai.config);
+        }
         v.to_string()
     }
 
     /// Restore state written by `persist`. Unknown or malformed data is ignored.
     pub fn restore(&mut self, json: &str) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return };
+        if let Ok(config) = serde_json::from_value::<pdfcraft_engine::ai::Config>(v["ai_provider"].clone())
+            && config.endpoint().is_ok()
+            && config.model.len() <= 256
+        {
+            self.ai.config = config;
+        }
         if let Ok(mut bar) = serde_json::from_value::<crate::hotbar::Hotbar>(v["hotbar"].clone()) {
             if v["hotbar"].get("placed").is_none() {
                 bar.adopt_legacy();

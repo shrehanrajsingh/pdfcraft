@@ -9,6 +9,10 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let Some((index, id)) = app.active_ids() else { return };
     let Some(panel) = app.right else { return };
+    if panel == RightPanel::Ai {
+        ai_panel(app, ui, &t);
+        return;
+    }
     let mut nav: Option<Nav> = None;
     let mut close = false;
     let mut toggle_layer: Option<(usize, bool)> = None;
@@ -60,6 +64,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     RightPanel::Tags => ("Tags", None),
                     RightPanel::Search => ("Search", None),
                     RightPanel::Compare => ("Compare", compare.as_ref().filter(|c| c.new == id).map(|c| c.result.changes.len())),
+                    RightPanel::Ai => ("AI assistant", None),
                 };
                 // Comments count like Acrobat (no replies); the replies go in small text below.
                 let replies = if panel == RightPanel::Comments { crate::comments_panel::reply_count(info) } else { 0 };
@@ -306,6 +311,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     }
                     RightPanel::Search => crate::search_ui::panel(ui, &t, view, info.pages.len()),
                     RightPanel::Compare => compare_action = crate::compare_ui::panel(ui, &t, compare, id),
+                    RightPanel::Ai => {}
                     RightPanel::Attachments => {
                         let attachable = doc.allows_modification() && doc.read_only_reason.is_none();
                         if attachable {
@@ -501,6 +507,36 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             v.flash = Some((p, r, 0.0));
         }
         None => {}
+    }
+}
+
+/// Inspector body for the AI assistant. Drawn outside the document-info borrow so the
+/// session-only key and preview/send actions can mutate the app.
+fn ai_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    let mut close = false;
+    egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin { left: 14, right: 12, top: 12, bottom: 8 }).stroke(Stroke::new(1.0, t.divider)).show(
+        ui,
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(tl!("AI assistant")).font(theme::semibold(15.5)));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icons::button(ui, "x", 26.0, false, tl!("Close")).clicked() {
+                        close = true;
+                    }
+                    let settings_on = app.ai.settings_open || !app.ai.config.enabled;
+                    if icons::button(ui, "settings", 26.0, settings_on, tl!("Provider settings")).clicked() {
+                        app.ai.settings_open = !app.ai.settings_open;
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                crate::ai_ui::body(ui, app);
+            });
+        },
+    );
+    if close {
+        app.choose_right_panel(None);
     }
 }
 

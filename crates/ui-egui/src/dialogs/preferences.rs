@@ -544,6 +544,12 @@ pub(crate) fn preferences_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tok
     });
     ui.add_space(12.0);
 
+    let title_ai = tl!("AI assistant");
+    preference_card(ui, t, title_ai, Some("sparkles"), &mut ctx, |ui, ctx| {
+        card_ai(ui, app, t, ctx);
+    });
+    ui.add_space(12.0);
+
     if ctx.first_match_scrolled {
         ui.data_mut(|d| d.insert_temp(last_scrolled_id, query.clone()));
     } else if query.trim().is_empty() {
@@ -887,6 +893,18 @@ fn card_fill_and_sign(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, ctx:
     date_format(ui, app, t, ctx);
 }
 
+fn card_ai(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, ctx: &mut PrefSearchContext) {
+    ctx.label_secondary(ui, tl!("Bring your own OpenAI-compatible model. Off by default. Paste the API key here in the app."), t);
+    ui.add_space(6.0);
+    if crate::ai_ui::provider_settings(ui, app) {
+        app.test_ai();
+    }
+    ui.add_space(6.0);
+    if ui.button(tl!("Open AI assistant…")).clicked() {
+        app.open_ai("ai.settings");
+    }
+}
+
 /// Content for Card 6: JavaScript
 fn card_javascript(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens, ctx: &mut PrefSearchContext) {
     let mut on = app.session.javascript();
@@ -1077,6 +1095,22 @@ fn reading_colours_section(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tokens,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_card_includes_the_api_key_field() {
+        use crate::{Dialog, PdfCraftApp};
+        use egui_kittest::kittest::Queryable;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| {
+            let mut app = PdfCraftApp::new();
+            app.set_option("language", "en").unwrap();
+            app.dialog = Some(Dialog::Preferences);
+            app
+        });
+        h.run_steps(4);
+        h.get_by_label("API key (optional for local servers)");
+        h.get_by_label("Enable AI assistant");
+        h.get_by_label("Test connection");
+    }
 
     #[test]
     fn test_find_match_ranges_case_insensitive() {

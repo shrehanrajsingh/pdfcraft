@@ -1,0 +1,20 @@
+Label = "AI assistant"
+Button "Close" [off]
+Button "Provider settings" [on]
+CheckBox "Enable AI assistant" [off]
+Label = "API base URL"
+TextInput "API base URL" = "https://api.openai.com/v1"
+Label = "Model ID"
+TextInput "Model ID"
+Label = "API key (optional for local servers)"
+PasswordInput "API key (optional for local servers)"
+Label = "Paste the key here. It stays in memory for this session and is never saved in preferences."
+Button "Clear API key"
+CheckBox "Use legacy max_tokens (older compatible servers)" [off]
+Button "Test connection" [disabled]
+RadioButton "Summarize" [on]
+RadioButton "Ask" [off]
+RadioButton "Translate" [off]
+RadioButton "This page" [off]
+RadioButton "Document" [on]
+Button "Preview" [disabled]

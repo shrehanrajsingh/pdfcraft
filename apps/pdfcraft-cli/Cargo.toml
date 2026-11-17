@@ -24,6 +24,8 @@ pdfcraft-platform = { workspace = true }
 base64 = "0.23"
 
 [dev-dependencies]
+pdfcraft-testkit = { workspace = true }
+tempfile = "3.27"
 # Decodes `render` output in tests/it/owner_password.rs.
 craft-image-codecs = { workspace = true }
 

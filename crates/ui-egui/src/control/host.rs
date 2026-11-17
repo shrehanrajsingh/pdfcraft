@@ -79,6 +79,7 @@ impl Host for crate::PdfCraftApp {
         #[cfg(target_arch = "wasm32")]
         let pending_opens: Vec<Value> = Vec::new();
         json!({
+            "ai": self.ai.state(),
             "side_panels": crate::side_panels::state(self),
             "documents": docs,
             "pending_opens": pending_opens,

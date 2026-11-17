@@ -14,6 +14,9 @@ impl PdfCraftApp {
     ///
     /// This is the seed of the UI control channel (M3.9): the same verbs become `ui.set` calls.
     pub fn set_option(&mut self, key: &str, value: &str) -> Result<(), String> {
+        if key.starts_with("ai-") {
+            return self.set_ai_option(key, value);
+        }
         let view = self.active.and_then(|i| self.views.get_mut(i));
         match (key, view) {
             ("hotbar-size", _) => {
@@ -72,6 +75,7 @@ impl PdfCraftApp {
                     "tags" => Some(RightPanel::Tags),
                     "search" => Some(RightPanel::Search),
                     "compare" => Some(RightPanel::Compare),
+                    "ai" => Some(RightPanel::Ai),
                     "none" => None,
                     other => return Err(format!("unknown panel {other}")),
                 }
@@ -127,6 +131,10 @@ impl PdfCraftApp {
                     "js-console" => Some(Dialog::JsConsole),
                     "document-js" => Some(Dialog::DocumentJs),
                     "preferences" => Some(Dialog::Preferences),
+                    "ai" => {
+                        self.open_ai("ai.settings");
+                        return Ok(());
+                    }
                     "compare-files" => Some(Dialog::CompareFiles),
                     "action-wizard" => Some(Dialog::ActionWizard),
                     "pdfa" => Some(Dialog::PdfA),

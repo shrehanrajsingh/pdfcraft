@@ -235,6 +235,10 @@ impl PdfCraftApp {
                 }
             }
             "app.preferences" => self.dialog = Some(Dialog::Preferences),
+            "ai.settings" | "ai.summary" | "ai.ask" | "ai.translate" => self.open_ai(id),
+            "ai.preview" => self.start_ai(false),
+            "ai.send" => self.start_ai(true),
+            "ai.test" => self.test_ai(),
             "protect.remove_hidden" => self.open_remove_hidden(),
             "print.dialog" => self.open_print(),
             "optimize.advanced" => self.dialog = Some(Dialog::Optimize),

@@ -52,6 +52,8 @@ pub enum RightPanel {
     Search,
     /// Compare files: the differences.
     Compare,
+    /// Bring-your-own-model assistant: summarize, ask, translate beside the page.
+    Ai,
 }
 
 /// Quick-action bar tools (the vertical floating strip).

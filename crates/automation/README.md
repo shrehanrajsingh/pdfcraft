@@ -282,6 +282,12 @@ unapplied with a warning.
 folders. The CLI also exposes it as `pdfcraft-cli batch`. See the
 [batch guide](../../docs/cli-batch.md) for examples, output protection, errors and limits.
 
+## Optional AI assistant
+
+`ai_preview` extracts bounded page text without a provider request. `ai_summary`, `ai_ask`,
+`ai_translate` and `ai_provider_test` require explicit send consent and launcher-configured
+provider settings. See [setup, privacy and examples](../../docs/ai-assistant.md).
+
 ## Editing button export values
 
 Use `form_set_props` with `field`, `export_value` and optional `widget`

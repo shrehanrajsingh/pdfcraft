@@ -28,6 +28,15 @@ fn doc() -> Value {
     json!({ "type": "integer", "minimum": 1, "description": "Document id from doc_open or doc_list." })
 }
 
+fn ai_schema() -> Value {
+    schema(
+        json!({"doc": doc(), "pages": pages("to send to AI"),
+        "input":{"type":"string","maxLength":8000,"description":"Question for ai_ask, target language for ai_translate."},
+        "allow_send":{"type":"boolean","description":"Explicit permission to send text and input to the configured provider."}}),
+        &["doc", "allow_send"],
+    )
+}
+
 fn pages(what: &str) -> Value {
     json!({ "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1, "description": format!("1-based page numbers {what}.") })
 }
@@ -135,6 +144,16 @@ pub fn tools() -> Vec<ToolDef> {
     let save_out = json!({ "type": "string", "description": "File to write. Omit to open the result as a new unsaved document instead." });
     let open = json!({ "type": "boolean", "description": "Also open the result as a new document (default: only when out is omitted)." });
     vec![
+        t("ai_preview", "Preview AI document text", "Extract the exact bounded text for selected pages without network access. Copy permissions and pending redactions are checked. Pages default to all (at most 100 pages / 120000 UTF-8 bytes).")
+            .ro().cmd("ai.preview").with(schema(json!({"doc": doc(), "pages": pages("to send to AI")}), &["doc"])),
+        t("ai_provider_test", "Test AI provider", "Contact the launcher-configured provider's /models endpoint. No document text. Requires PDFCRAFT_AI_ENABLED=1, PDFCRAFT_AI_BASE_URL and optional PDFCRAFT_AI_API_KEY. Model listing does not require PDFCRAFT_AI_MODEL. Credentials and destination cannot be supplied by tool arguments.")
+            .cmd("ai.test").with(schema(json!({"allow_send":{"type":"boolean"}}), &["allow_send"])),
+        t("ai_summary", "Summarize with AI", "Send document text to the launcher-configured OpenAI-compatible provider. Requires explicit allow_send=true and PDFCRAFT_AI_ENABLED=1. Use ai_preview first. This does not edit the PDF; verify all generated claims and citations.")
+            .cmd("ai.summary").with(ai_schema()),
+        t("ai_ask", "Ask about a document", "Answer input using selected document pages through the explicitly configured AI provider. Requires allow_send=true. Questions and text leave the process. Verify generated citations.")
+            .cmd("ai.ask").with(ai_schema()),
+        t("ai_translate", "Translate document text", "Translate selected pages into the language named in input through the explicitly configured AI provider. Requires allow_send=true. Returns text, without rewriting the PDF.")
+            .cmd("ai.translate").with(ai_schema()),
         t("doc_bates_multi", "Add Bates numbering across files", "Apply one consecutive Bates sequence to an ordered list of PDFs. Each file entry has input and output paths and an optional open or permissions password. The operation first validates every input/output and computes inclusive numeric intervals; dry_run returns that allocation without writing. Existing output files are never replaced. On application, files that cannot be edited or saved are reported individually and later files continue.")
             .destructive()
             .with(schema(json!({

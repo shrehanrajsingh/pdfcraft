@@ -67,6 +67,7 @@ const EXTRA: &[(&str, &str, Option<Shortcut>)] = &[
 /// View ▸ Side panels: the panel, its id in [`PANEL`] commands and its English label.
 const PANELS: &[(RightPanel, &str, &str)] = &[
     (RightPanel::Comments, "comments", "Comments"),
+    (RightPanel::Ai, "ai", "AI assistant"),
     (RightPanel::Bookmarks, "bookmarks", "Bookmarks"),
     (RightPanel::Pages, "pages", "Pages"),
     (RightPanel::Fields, "fields", "Fields"),

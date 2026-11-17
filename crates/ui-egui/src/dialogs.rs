@@ -92,6 +92,7 @@ struct Pending {
 }
 
 pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
+    app.poll_ai();
     // The page sets hover cursors from the raw pointer position (form fields, links, comments)
     // before any dialog is drawn, and nothing under a modal's backdrop takes clicks. Start from
     // the arrow; the modal's own widgets set theirs as they are drawn.

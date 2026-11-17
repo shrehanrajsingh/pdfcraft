@@ -67,6 +67,7 @@ impl PdfCraftApp {
     /// Construct default session, panels, theme and control state with no active property-edit session.
     pub fn new() -> Self {
         Self {
+            ai: Default::default(),
             panes: Default::default(),
             session: Session::new(),
             status_captions_lang: None,

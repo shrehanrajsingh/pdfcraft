@@ -416,9 +416,12 @@ update the numbers.
 
 ### 23. Local AI provider
 
-- **Missing:** the opt-in provider interface (local model or the user's own endpoint) and the
-  features on it: summarize, ask with page citations, alternate-text and redaction suggestions.
-  Acrobat's AI Assistant is a cloud service and out of scope.
+- **Partial:** an opt-in OpenAI-compatible provider with session-only API-key input, text preview,
+  summaries, questions and text translation is implemented for native desktop and CLI/MCP.
+  See [setup and limits](ai-assistant.md). Model-generated page citations need verification.
+- **Missing:** in-process local inference, verified citations, alternate-text and redaction
+  suggestions, conversational editing and translated PDF output. Acrobat's own cloud service
+  remains out of scope.
 - **Estimate:** 20–40 h. **Doc:** [target-app-parity.md](target-app-parity.md).
 
 ### 24. Checklist not diffed against Acrobat's own menus
@@ -433,6 +436,7 @@ update the numbers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-17 | minor | Gap 23: optional OpenAI-compatible provider with session-only API-key input, text preview, summaries, questions and text translation on native desktop and CLI/MCP. Local inference and verified citations remain missing. Estimates unchanged. |
 | 2026-11-11 | minor | Gap 8: known residual risk for the LibreOffice sidecar (Impress has no link-update setting; the soffice process isn't network-sandboxed). Sandboxing tracked in #6953. Estimates unchanged. |
 | 2026-10-26 | minor | Gap 8: the LibreOffice profile never updates Writer or Calc linked content on load; Impress has no such setting and the process's network access isn't sandboxed. Estimates unchanged. |
 | 2026-10-25 | minor | Gaps 5 and 14 current state: native release builds embed LXGW WenKai Lite for Simplified Chinese, while the web build has no Hans face; Arabic catalogs stay logical with explicit RTL label direction and mirrored stock chrome, while native/browser RTL input, IME and complex workflows remain unqualified. Estimates unchanged. |

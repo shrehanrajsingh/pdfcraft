@@ -87,6 +87,7 @@ pub use recovery::{AUTOSAVE_SECS, RecoveryMeta, RecoveryStore, default_dictionar
 use theme::{ThemeKind, ThemePreference};
 pub use workflows::ocr_verify::{OcrVerify, Phase};
 
+mod ai_ui;
 mod app;
 mod frame_guard;
 mod hooks;
@@ -306,6 +307,7 @@ struct PendingDestination {
 }
 
 pub struct PdfCraftApp {
+    pub(crate) ai: ai_ui::Assistant,
     /// Split view (`panes`); which pane shows each tab is its view's.
     pub panes: panes::Panes,
     /// Tools side and pane widths; which panes are open is `left_open` and `right`.

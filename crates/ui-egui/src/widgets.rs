@@ -7,6 +7,7 @@ use crate::theme::{self, Tokens};
 
 pub(super) mod icon_data;
 pub mod icons;
+pub(crate) mod markdown;
 
 /// Horizontal and vertical inset of a single-line field.
 const FIELD_MARGIN: egui::Margin = egui::Margin::symmetric(10, 6);
@@ -219,17 +220,27 @@ pub fn pill_button(ui: &mut egui::Ui, label: &str, primary: bool) -> Response {
     pill_button_marked(ui, label, primary, false)
 }
 
+/// [`pill_button`] stretched to the current layout width (inspector primary actions).
+pub fn pill_button_fill(ui: &mut egui::Ui, label: &str, primary: bool) -> Response {
+    pill_at(ui, label, primary, false, Some(ui.available_width().max(28.0)))
+}
+
 /// [`pill_button`] that, when `marked`, is the keyboard's choice: it takes egui focus (so
 /// assistive tech follows it) and shows a ring in the accent colour around the pill.
 pub fn pill_button_marked(ui: &mut egui::Ui, label: &str, primary: bool, marked: bool) -> Response {
+    pill_at(ui, label, primary, marked, None)
+}
+
+fn pill_at(ui: &mut egui::Ui, label: &str, primary: bool, marked: bool, width: Option<f32>) -> Response {
     let t = Tokens::get(ui.ctx());
     let font = theme::medium(12.5);
     let text_color = if primary { Color32::WHITE } else { t.text };
     // Dialog buttons are translated UI text: an explicit RTL base keeps an Arabic label right
     // to left even when its first strong character is Latin or a placeholder.
     let label_galley = crate::bidi::layout_ui(ui, label.to_owned(), font, text_color);
-    let w = label_galley.size().x;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w + 26.0, 28.0), Sense::click());
+    let w = width.unwrap_or(label_galley.size().x + 26.0);
+    let h = if width.is_some() { 32.0 } else { 28.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
     let press = theme::Press::track(ui, &resp);
     let (fill, stroke) = if primary {
