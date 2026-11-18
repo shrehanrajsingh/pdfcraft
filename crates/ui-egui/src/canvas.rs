@@ -545,6 +545,10 @@ pub struct DocView {
     single_edges: Option<(usize, bool, bool)>,
     /// Briefly outline an annotation after navigating to it from a panel.
     pub flash: Option<(usize, [f32; 4], f64)>,
+    /// Citation highlight: page, view-space boxes, and the time it started (0 until painted).
+    pub citation_flash: Option<(usize, Vec<[f32; 4]>, f64)>,
+    /// Ask / Explain / Summarize chosen on the selection bar, taken by the assistant.
+    pub(crate) selection_ask: Option<SelectionAsk>,
     /// Compare files: differences shaded on this document's pages (page, user-space box, colour).
     pub compare_marks: Vec<(usize, [f32; 4], Color32)>,
     /// The interface the document hid in this tab, and what is hidden now (ISO 32000-2 Table 147
@@ -1075,6 +1079,8 @@ impl DocView {
             side_edges: None,
             single_edges: None,
             flash: None,
+            citation_flash: None,
+            selection_ask: None,
             compare_marks: Vec::new(),
             interface: Default::default(),
             presentation: None,
@@ -3215,6 +3221,34 @@ fn fits_height(r: Rect, view_height: f32, pixels_per_point: f32) -> bool {
 /// Draws the document tab at `index`: its notice bars, then its pages (or the Organize grid) in a
 /// scroll area with this frame's zoom, scrolling, tool input, overlays (form fields, comments,
 /// signature badges and sign tabs) and render requests.
+/// How long a citation highlight stays up, fading across that interval.
+pub(crate) const CITATION_FLASH_SECS: f32 = 2.0;
+
+/// Alpha of a citation highlight `age` seconds after it started. `None` once it has finished.
+pub(crate) fn citation_flash_alpha(age: f32) -> Option<u8> {
+    if !age.is_finite() || age < 0.0 || age >= CITATION_FLASH_SECS {
+        return None;
+    }
+    let span = CITATION_FLASH_SECS - age;
+    let alpha = span / CITATION_FLASH_SECS * 255.0;
+    Some(alpha.clamp(0.0, 255.0) as u8)
+}
+
+/// Text the selection bar asked the assistant about.
+#[derive(Clone, Debug)]
+pub(crate) struct SelectionAsk {
+    /// `ask`, `explain`, or `summarize`.
+    pub task_name: &'static str,
+    /// The selection is a rectangle around a region, not a text run.
+    pub region: bool,
+    pub page: usize,
+    pub text: String,
+    /// `(page, glyph start, glyph end)` for each page of a text selection.
+    pub ranges: Vec<(usize, usize, usize)>,
+    /// View-space box of a region selection.
+    pub rect: Option<[f32; 4]>,
+}
+
 pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let can_paste_key = egui::Id::unique("can-paste-image");
@@ -3687,6 +3721,9 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
         generation,
         avail,
     } = requests;
+    if let Some(ask) = app.views[index].selection_ask.take() {
+        app.attach_selection_ask(ask);
+    }
     if let Some((page, at)) = app.views[index].comments.attach_at.take() {
         app.attach_file_comment(page, at);
     }

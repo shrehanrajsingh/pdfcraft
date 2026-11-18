@@ -9862,8 +9862,10 @@ evidence = [
   "crates/engine/src/ai/tests.rs::ai_conversation_is_bounded_and_keeps_page_context",
   "crates/engine/src/ai/tests.rs::ai_follow_up_http_sends_prior_turns_and_page_markers",
   "apps/pdfcraft-cli/tests/it/ai.rs::ai_cli_round_trip_and_consent_gate",
+  "crates/engine/src/ai/retrieve.rs::retrieval_ranks_the_current_page_and_keeps_the_other_page",
+  "crates/engine/src/ai/agent.rs::invalid_span_ids_are_removed_and_valid_ones_keep_their_boxes",
 ]
-notes = "Read-only summaries of at most 100 pages / 120000 UTF-8 bytes. The UI continues as a session-only chat over that snapshot; CLI one-shot remains ai_summary, follow-ups use ai_chat. No retrieval."
+notes = "Read-only summaries of at most 100 pages / 120000 UTF-8 bytes. Summarize retrieves passages (current page and a selection first) instead of pasting every page. Citations whose span id is not in that evidence are removed. CLI one-shot remains ai_summary; follow-ups use ai_chat and retrieve again."
 
 [[feature]]
 id = "misc.ai-ask"
@@ -9885,8 +9887,17 @@ evidence = [
   "crates/ui-egui/src/widgets/math.rs::ratex_renders_frac_to_a_png_raster",
   "crates/engine/src/ai/tests.rs::ai_follow_up_http_sends_image_data_urls",
   "apps/pdfcraft-cli/tests/it/ai.rs::ai_cli_round_trip_and_consent_gate",
+  "crates/engine/src/ai/agent.rs::invalid_span_ids_are_removed_and_valid_ones_keep_their_boxes",
+  "crates/engine/src/ai/agent.rs::document_text_cannot_change_the_system_message_or_add_a_tool",
+  "crates/engine/src/ai/agent.rs::images_stay_off_until_the_model_is_marked_and_the_question_needs_them",
+  "crates/engine/src/ai/retrieve.rs::a_selection_brings_its_neighbor_and_not_the_whole_file",
+  "crates/engine/src/ai/index.rs::span_ids_are_stable_and_repeat_text_keeps_distinct_boxes",
+  "crates/engine/src/ai/index.rs::index_refuses_copy_blocks_and_pending_redactions",
+  "crates/ui-egui/src/canvas/tests.rs::citation_flash_lasts_two_seconds_and_covers_every_line_at_two_zooms",
+  "crates/ui-egui/src/widgets/markdown.rs::citation_markers_split_outside_code",
+  "crates/automation/tests/it/ai.rs::ai_index_and_search_return_stable_span_boxes_without_a_provider",
 ]
-notes = "Read-only questions over selected text, with UI follow-ups over the same snapshot. Paste or attach still images on a user turn (OpenAI vision data URLs). Answers render CommonMark through egui_commonmark (GitHub pipe tables) and TeX through RaTeX ($…$, $$…$$, \\[…\\]). Physical page markers are supplied, but generated citations are not independently verified."
+notes = "Read-only questions over retrieved spans. The open page and a selection rank first and do not hide other pages. A citation chip opens the indexed boxes; a span id the evidence does not contain is removed. Page images are off unless the user enables them and the model is marked as accepting images. Paste or attach still images on a user turn (OpenAI vision data URLs). Answers render CommonMark through egui_commonmark (GitHub pipe tables) and TeX through RaTeX ($…$, $$…$$, \\[…\\]). Selecting text can ask, explain, or summarize without clearing the selection. ai_index and ai_search do not call the network."
 
 [[feature]]
 id = "misc.ai-conversational-edit"

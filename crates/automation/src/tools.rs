@@ -30,11 +30,28 @@ fn doc() -> Value {
 
 fn ai_schema() -> Value {
     schema(
-        json!({"doc": doc(), "pages": pages("to send to AI"),
+        json!({"doc": doc(), "pages": pages("to include"),
+        "page":{"type":"integer","minimum":1,"description":"1-based page the reader is on. It ranks first and does not hide other pages."},
+        "selection": selection_schema(),
         "input":{"type":"string","maxLength":8000,"description":"Question for ai_ask, target language for ai_translate."},
         "allow_send":{"type":"boolean","description":"Explicit permission to send text and input to the configured provider."}}),
         &["doc", "allow_send"],
     )
+}
+
+fn selection_schema() -> Value {
+    json!({
+        "type":"object",
+        "description":"A passage or region to keep with the question. Glyph start and end are zero-based and end-exclusive, from ai_index.",
+        "properties":{
+            "text":{"type":"string","maxLength":8000},
+            "page":{"type":"integer","minimum":1},
+            "start":{"type":"integer","minimum":0},
+            "end":{"type":"integer","minimum":0},
+            "rect":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4,"description":"View-space box [x0, y0, x1, y1], origin top-left of the displayed page, y down."}
+        },
+        "additionalProperties": false
+    })
 }
 
 fn pages(what: &str) -> Value {
@@ -146,6 +163,10 @@ pub fn tools() -> Vec<ToolDef> {
     vec![
         t("ai_preview", "Preview AI document text", "Extract the exact bounded text for selected pages without network access. Copy permissions and pending redactions are checked. Pages default to all (at most 100 pages / 120000 UTF-8 bytes).")
             .ro().cmd("ai.preview").with(schema(json!({"doc": doc(), "pages": pages("to send to AI")}), &["doc"])),
+        t("ai_index", "Index document spans", "List reading-order spans for the requested pages, with stable ids and view-space boxes. No network. Copy permissions and pending redactions are checked. Pages default to all, at most 100.")
+            .ro().with(schema(json!({"doc": doc(), "pages": pages("to index")}), &["doc"])),
+        t("ai_search", "Search document spans", "Keyword search over indexed spans. Returns the span id, page, text and view-space boxes. No network.")
+            .ro().with(schema(json!({"doc": doc(), "pages": pages("to search"), "query":{"type":"string","minLength":1,"maxLength":8000}}), &["doc", "query"])),
         t("ai_provider_test", "Test AI provider", "Contact the launcher-configured provider's /models endpoint. No document text. Requires PDFCRAFT_AI_ENABLED=1, PDFCRAFT_AI_BASE_URL and optional PDFCRAFT_AI_API_KEY. Model listing does not require PDFCRAFT_AI_MODEL. Credentials and destination cannot be supplied by tool arguments.")
             .cmd("ai.test").with(schema(json!({"allow_send":{"type":"boolean"}}), &["allow_send"])),
         t("ai_summary", "Summarize with AI", "Send document text to the launcher-configured OpenAI-compatible provider. Requires explicit allow_send=true and PDFCRAFT_AI_ENABLED=1. Use ai_preview first. This does not edit the PDF; verify all generated claims and citations.")
@@ -155,7 +176,9 @@ pub fn tools() -> Vec<ToolDef> {
         t("ai_chat", "Continue an AI conversation", "Send a follow-up with prior turns and the same document snapshot to the launcher-configured provider. messages must end with the new user turn. User turns may attach PNG/JPEG (or other still images, re-encoded) via images paths, at most 4 per message and 8 in the conversation. Requires allow_send=true. The assistant never edits the PDF.")
             .cmd("ai.send").with(schema(json!({
                 "doc": doc(),
-                "pages": pages("to send to AI"),
+                "pages": pages("to include"),
+                "page":{"type":"integer","minimum":1,"description":"1-based page the reader is on. It ranks first and does not hide other pages."},
+                "selection": selection_schema(),
                 "task": {"type":"string","enum":["summary","ask","translate"],"description":"Original task that started the conversation (default ask)."},
                 "input":{"type":"string","maxLength":8000,"description":"Starter question or translation language from the first turn. Empty for summary."},
                 "images":{"type":"array","maxItems":4,"items": path_arg(), "description":"Pictures sent with the original document snapshot (PNG, JPEG, GIF, TIFF or BMP). Relative to --root when set."},

@@ -3538,3 +3538,22 @@ fn waiting_marks_are_dropped_when_their_pages_change() {
     assert_eq!(v.tool_marks(QuickTool::Redact, false, Some(0), true, &now), ToolMarks::None, "nothing marked");
     assert_eq!(app.session.get(id).unwrap().redaction_marks(), 0);
 }
+
+/// A citation highlight stays up for two seconds and every line of the span is drawn, at more than one zoom.
+#[test]
+fn citation_flash_lasts_two_seconds_and_covers_every_line_at_two_zooms() {
+    assert!(citation_flash_alpha(0.0).is_some());
+    assert!(citation_flash_alpha(1.9).is_some());
+    assert_eq!(citation_flash_alpha(2.0), None);
+    assert_eq!(citation_flash_alpha(f32::NAN), None);
+    let lines = [[10.0, 20.0, 80.0, 32.0], [10.0, 40.0, 70.0, 52.0]];
+    for zoom in [1.0_f32, 2.0] {
+        let xf = PageXform { rect: Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0 * zoom, 100.0 * zoom)), rot: 0, pw: 200.0, ph: 100.0 };
+        let painted: Vec<Rect> = lines.iter().copied().map(|rect| xf.view_rect(rect)).collect();
+        assert_eq!(painted.len(), lines.len());
+        assert!(painted[0].top() < painted[1].top(), "{painted:?}");
+        let width = lines[0][2] - lines[0][0];
+        let scale = painted[0].width() / width;
+        assert!((scale - zoom).abs() < 0.01, "zoom {zoom} drew {scale}");
+    }
+}

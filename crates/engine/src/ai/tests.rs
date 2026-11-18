@@ -2,6 +2,7 @@ use super::*;
 
 #[test]
 fn ai_is_off_by_default_and_rejects_unsafe_endpoints() {
+    assert!(Config::default().stream_responses);
     assert!(Config::default().validate().is_err());
     assert!(Config::default().validate_connection().is_err());
     assert!(!Config::default().should_persist());
@@ -41,7 +42,7 @@ fn ai_prompts_are_bounded_and_use_source_page_numbers() {
     assert_eq!(prepared.pages, [2]);
     assert!(prepared.text.contains("[Page 2]"));
     let prompt = prepared.prompt(Task::Ask, "What page is this?").unwrap();
-    assert!(prompt.contains("untrusted data"));
+    assert!(prompt.contains("own knowledge"));
     assert!(prompt.contains("What page is this?"));
     assert!(prepared.prompt(Task::Ask, " ").is_err());
     assert!(prepared.prompt(Task::Translate, &"é".repeat(MAX_PROMPT_BYTES)).is_err());
@@ -149,7 +150,9 @@ mod http {
         assert!(request.to_lowercase().contains("authorization: bearer synthetic-api-key"));
         let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["model"], "test-model");
-        assert_eq!(body["max_completion_tokens"], 2048);
+        assert!(body.get("max_completion_tokens").is_none());
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["stream"], false);
         assert!(body.get("temperature").is_none());
         assert!(body["messages"][0]["content"].as_str().unwrap().contains("[Page 3]"));
     }
@@ -191,17 +194,42 @@ mod http {
     #[test]
     fn ai_rejects_malformed_oversized_empty_and_incomplete_answers() {
         for body in [
-            "not JSON".into(),
-            "x".repeat(1024 * 1024 + 1),
-            r#"{"choices":[{"message":{"content":""}}]}"#.into(),
-            r#"{"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}"#.into(),
-            r#"{"choices":[{"finish_reason":"tool_calls","message":{"content":"tool"}}]}"#.into(),
+            r#"{"choices":[{"message":{"content":""}}]}"#,
+            r#"{"choices":[{"finish_reason":"length","message":{"content":""}}]}"#,
+            r#"{"choices":[{"finish_reason":"tool_calls","message":{"content":"tool"}}]}"#,
         ] {
-            let (config, worker) = server("200 OK", &body, "");
+            let (config, worker) = server("200 OK", body, "");
             let mut provider = OpenAiProvider::new(config, String::new()).unwrap();
             assert!(provider.complete("hello", &Default::default()).is_err());
             worker.join().unwrap();
         }
+    }
+
+    #[test]
+    fn an_unreadable_body_is_shown_as_text() {
+        let (config, worker) = server("200 OK", "Plain summary, not JSON.", "");
+        let mut provider = OpenAiProvider::new(config, String::new()).unwrap();
+        assert_eq!(provider.complete("hello", &Default::default()).unwrap(), "Plain summary, not JSON.");
+        worker.join().unwrap();
+
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Kept\"}}]}\n\n",
+            "data: this line is not json\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" answer\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (mut config, worker) = server("200 OK", body, "");
+        config.stream_responses = true;
+        let mut provider = OpenAiProvider::new(config, String::new()).unwrap();
+        let mut seen = Vec::new();
+        let answer = provider
+            .complete_chat_reporting(&[ChatMessage { role: "user".into(), text: "Hi".into(), images: Vec::new() }], StreamKind::Plain, &mut |text| {
+                seen.push(text.to_string());
+            })
+            .unwrap();
+        assert_eq!(answer, "Kept\nthis line is not json answer");
+        assert!(seen.iter().any(|text| text.contains("this line is not json")), "{seen:?}");
+        worker.join().unwrap();
     }
 
     #[test]
@@ -211,7 +239,7 @@ mod http {
         let mut provider = OpenAiProvider::new(config, "synthetic-secret".into()).unwrap();
         assert_eq!(provider.complete("hello", &Default::default()).unwrap(), "[API key removed]");
         let request = worker.join().unwrap();
-        assert!(request.contains("\"max_tokens\""));
+        assert!(!request.contains("\"max_tokens\""));
         assert!(!request.contains("max_completion_tokens"));
     }
 
@@ -220,13 +248,13 @@ mod http {
         let prepared = Prepared { text: "[Page 3]\nSynthetic document".into(), pages: vec![3] };
         let first = prepared.conversation_messages(Task::Summary, "", &[], &[]).unwrap();
         assert_eq!(first[0].role, "system");
-        assert!(first[0].text.contains("untrusted data"));
+        assert!(first[0].text.contains("own knowledge"));
         assert!(first[0].images.is_empty());
         assert_eq!(first[1].role, "user");
         assert!(first[1].text.contains("[Page 3]"));
         let follow = vec![
-            Turn { role: Role::Assistant, text: "A short summary [Page 3].".into(), images: Vec::new() },
-            Turn { role: Role::User, text: "What about revenue?".into(), images: Vec::new() },
+            Turn { role: Role::Assistant, text: "A short summary [Page 3].".into(), images: Vec::new(), citations: Vec::new() },
+            Turn { role: Role::User, text: "What about revenue?".into(), images: Vec::new(), citations: Vec::new() },
         ];
         let messages = prepared.conversation_messages(Task::Summary, "", &follow, &[]).unwrap();
         assert_eq!(messages.len(), 4);
@@ -234,16 +262,21 @@ mod http {
         assert!(messages[2].text.contains("A short summary"));
         assert_eq!(messages[3].text, "What about revenue?");
         let too_many: Vec<Turn> = (0..=MAX_TURNS)
-            .map(|i| Turn { role: if i % 2 == 0 { Role::Assistant } else { Role::User }, text: "x".into(), images: Vec::new() })
+            .map(|i| Turn {
+                role: if i % 2 == 0 { Role::Assistant } else { Role::User },
+                text: "x".into(),
+                images: Vec::new(),
+                citations: Vec::new(),
+            })
             .collect();
         let err = prepared.conversation_messages(Task::Summary, "", &too_many, &[]).unwrap_err();
         assert!(err.contains("too long"), "{err}");
-        let huge = vec![Turn { role: Role::User, text: "é".repeat(MAX_HISTORY_BYTES + 1), images: Vec::new() }];
+        let huge = vec![Turn { role: Role::User, text: "é".repeat(MAX_HISTORY_BYTES + 1), images: Vec::new(), citations: Vec::new() }];
         assert!(prepared.conversation_messages(Task::Summary, "", &huge, &[]).is_err());
-        let not_user = vec![Turn { role: Role::Assistant, text: "only a reply".into(), images: Vec::new() }];
+        let not_user = vec![Turn { role: Role::Assistant, text: "only a reply".into(), images: Vec::new(), citations: Vec::new() }];
         assert!(prepared.conversation_messages(Task::Summary, "", &not_user, &[]).unwrap_err().contains("last message"));
         let image = ChatImage::from_rgba(2, 2, &[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255]).unwrap();
-        let pictured = vec![Turn { role: Role::User, text: String::new(), images: vec![image.clone()] }];
+        let pictured = vec![Turn { role: Role::User, text: String::new(), images: vec![image.clone()], citations: Vec::new() }];
         let with_image = prepared.conversation_messages(Task::Ask, "What is this?", &pictured, &[]).unwrap();
         assert_eq!(with_image.last().map(|m| m.images.len()), Some(1));
         let snapshot = prepared.conversation_messages(Task::Summary, "", &[], std::slice::from_ref(&image)).unwrap();
@@ -256,8 +289,8 @@ mod http {
         let mut provider = OpenAiProvider::new(config, "synthetic-api-key".into()).unwrap();
         let prepared = Prepared { text: "[Page 3]\nSynthetic document".into(), pages: vec![3] };
         let turns = vec![
-            Turn { role: Role::Assistant, text: "A short summary [Page 3].".into(), images: Vec::new() },
-            Turn { role: Role::User, text: "What about revenue?".into(), images: Vec::new() },
+            Turn { role: Role::Assistant, text: "A short summary [Page 3].".into(), images: Vec::new(), citations: Vec::new() },
+            Turn { role: Role::User, text: "What about revenue?".into(), images: Vec::new(), citations: Vec::new() },
         ];
         assert_eq!(prepared.complete_conversation(&mut provider, Task::Summary, "", &turns, &[]).unwrap(), "Revenue is ten [Page 3].");
         let request = worker.join().unwrap();
@@ -278,7 +311,7 @@ mod http {
         let mut provider = OpenAiProvider::new(config, String::new()).unwrap();
         let prepared = Prepared { text: "[Page 1]\nSynthetic document".into(), pages: vec![1] };
         let image = ChatImage::from_rgba(2, 2, &[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255]).unwrap();
-        let turns = vec![Turn { role: Role::User, text: "What colour?".into(), images: vec![image] }];
+        let turns = vec![Turn { role: Role::User, text: "What colour?".into(), images: vec![image], citations: Vec::new() }];
         assert_eq!(prepared.complete_conversation(&mut provider, Task::Ask, "What colour?", &turns, &[]).unwrap(), "A red square.");
         let request = worker.join().unwrap();
         let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
@@ -288,5 +321,116 @@ mod http {
         let url = content[1]["image_url"]["url"].as_str().unwrap();
         assert!(url.starts_with("data:image/png;base64,"), "{url}");
         assert!(body["messages"][1]["content"].as_str().unwrap().contains("[Page 1]"));
+    }
+
+    #[test]
+    fn ai_stream_delivers_each_piece_and_still_returns_the_full_answer() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (mut config, worker) = server("200 OK", body, "");
+        config.stream_responses = true;
+        let mut provider = OpenAiProvider::new(config, "synthetic-secret".into()).unwrap();
+        let mut seen = Vec::new();
+        let answer = provider
+            .complete_chat_reporting(&[ChatMessage { role: "user".into(), text: "Hi".into(), images: Vec::new() }], StreamKind::Plain, &mut |text| {
+                seen.push(text.to_string());
+            })
+            .unwrap();
+        assert_eq!(answer, "Hello");
+        assert_eq!(seen, ["", "Hel", "Hello"]);
+        let request = worker.join().unwrap();
+        let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["stream"], true);
+        assert!(body.get("max_completion_tokens").is_none());
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn a_reply_cut_off_by_the_output_limit_is_kept() {
+        let (config, worker) = server("200 OK", r#"{"choices":[{"finish_reason":"length","message":{"content":"partial summary"}}]}"#, "");
+        let mut provider = OpenAiProvider::new(config, String::new()).unwrap();
+        assert_eq!(provider.complete("hello", &Default::default()).unwrap(), "partial summary");
+        worker.join().unwrap();
+
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Kept summary\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (mut config, worker) = server("200 OK", body, "");
+        config.stream_responses = true;
+        let mut provider = OpenAiProvider::new(config, String::new()).unwrap();
+        let answer = provider
+            .complete_chat_reporting(&[ChatMessage { role: "user".into(), text: "Hi".into(), images: Vec::new() }], StreamKind::Plain, &mut |_| {})
+            .unwrap();
+        assert_eq!(answer, "Kept summary");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn ai_stream_shows_a_json_answer_as_it_arrives_and_redacts_the_key() {
+        let event = |content: &str| {
+            let payload = serde_json::json!({"choices":[{"delta":{"content": content}}]});
+            format!("data: {payload}\n\n")
+        };
+        let body = format!(
+            "{}{}{}data: {{\"choices\":[{{\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n",
+            event(r#"{"answer":"Revenu"#),
+            event("e is synthetic-secret."),
+            event("\"}"),
+        );
+        let (mut config, worker) = server("200 OK", &body, "");
+        config.stream_responses = true;
+        let mut provider = OpenAiProvider::new(config, "synthetic-secret".into()).unwrap();
+        let mut seen = Vec::new();
+        let answer = provider
+            .complete_chat_reporting(&[ChatMessage { role: "user".into(), text: "Hi".into(), images: Vec::new() }], StreamKind::Answer, &mut |text| {
+                seen.push(text.to_string())
+            })
+            .unwrap();
+        assert!(answer.contains("\"answer\""), "{answer}");
+        assert!(!answer.contains("synthetic-secret"), "{answer}");
+        assert!(answer.contains("[API key removed]"));
+        assert!(seen.iter().any(|text| text == "Revenue is [API key removed]."), "{seen:?}");
+        assert!(seen.iter().all(|text| !text.contains("synthetic-secret")));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn ai_stream_accepts_a_server_that_returns_one_json_body() {
+        let (mut config, worker) = server("200 OK", r#"{"choices":[{"finish_reason":"stop","message":{"content":"All at once."}}]}"#, "");
+        config.stream_responses = true;
+        let mut provider = OpenAiProvider::new(config, String::new()).unwrap();
+        let mut seen = Vec::new();
+        let answer = provider
+            .complete_chat_reporting(&[ChatMessage { role: "user".into(), text: "Hi".into(), images: Vec::new() }], StreamKind::Plain, &mut |text| {
+                seen.push(text.to_string());
+            })
+            .unwrap();
+        assert_eq!(answer, "All at once.");
+        assert_eq!(seen, ["", "All at once."]);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn ai_stream_can_be_turned_off() {
+        let (mut config, worker) = server("200 OK", r#"{"choices":[{"finish_reason":"stop","message":{"content":"Waited."}}]}"#, "");
+        config.stream_responses = false;
+        let mut provider = OpenAiProvider::new(config, String::new()).unwrap();
+        let mut seen = Vec::new();
+        let answer = provider
+            .complete_chat_reporting(&[ChatMessage { role: "user".into(), text: "Hi".into(), images: Vec::new() }], StreamKind::Plain, &mut |text| {
+                seen.push(text.to_string());
+            })
+            .unwrap();
+        assert_eq!(answer, "Waited.");
+        assert!(seen.is_empty());
+        let request = worker.join().unwrap();
+        let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["stream"], false);
     }
 }

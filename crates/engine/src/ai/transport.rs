@@ -1,10 +1,19 @@
+use super::agent::visible_stream_text;
 use super::{ChatMessage, Config};
+use std::io::BufRead;
+
+/// Which part of a provider reply to show while it is still arriving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamKind {
+    /// The model returns the answer itself, as in Translate.
+    Plain,
+    /// The model returns a JSON object. Only the `answer` string is shown.
+    Answer,
+}
 use base64::Engine as _;
 use craft_ai::{AiError, GenOpts, Provider, ProviderInfo};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
-
-const MAX_RESPONSE: u64 = 1024 * 1024;
 
 /// PdfCraft adapter for the shared provider trait. Redirects must never resend document text.
 /// See docs/ai-assistant.md for the shared OpenAiCompat transport API gap.
@@ -42,6 +51,18 @@ impl OpenAiProvider {
             .into()
     }
 
+    /// Generation has no total time limit. A reasoning model can stream for longer than the
+    /// connection test. Connecting, and waiting for the response headers, still time out.
+    fn completion_agent() -> ureq::Agent {
+        ureq::Agent::config_builder()
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .timeout_connect(Some(std::time::Duration::from_secs(10)))
+            .timeout_recv_response(Some(std::time::Duration::from_secs(120)))
+            .build()
+            .into()
+    }
+
     fn url(&self, path: &str) -> Result<String, AiError> {
         self.endpoint.join(path).map(|u| u.to_string()).map_err(|_| AiError::NotConfigured)
     }
@@ -53,12 +74,8 @@ impl OpenAiProvider {
         if !(200..300).contains(&code) {
             return Err(AiError::Rejected(format!("HTTP {code}: {}.", Self::status_help(code, listing))));
         }
-        let bytes = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_RESPONSE)
-            .read_to_vec()
-            .map_err(|_| AiError::BadResponse("response unreadable or exceeds the 1 MiB limit".into()))?;
+        let bytes =
+            response.body_mut().with_config().limit(u64::MAX).read_to_vec().map_err(|_| AiError::BadResponse("response unreadable".into()))?;
         serde_json::from_slice(&bytes).map_err(|_| AiError::BadResponse("expected a JSON response".into()))
     }
 
@@ -71,7 +88,7 @@ impl OpenAiProvider {
             }
             (404, false) => "that model was not found; for OpenAI use gpt-4o-mini or gpt-4o, not ChatGPT",
             (429, _) => "rate limit or quota exceeded; check the provider account and try later",
-            (400 | 422, _) => "request rejected; check the model and try the legacy token-limit option if your server requires it",
+            (400 | 422, _) => "request rejected; check the model",
             (500..=599, _) => "provider unavailable; try again later",
             _ => "request rejected by the provider",
         }
@@ -79,19 +96,35 @@ impl OpenAiProvider {
 
     fn answer(&self, value: Value) -> Result<String, AiError> {
         let choice = value.pointer("/choices/0").ok_or_else(|| AiError::BadResponse("no completion returned".into()))?;
-        match choice.get("finish_reason").and_then(Value::as_str) {
-            Some("stop") | None => {}
-            Some("length") => return Err(AiError::BadResponse("answer exceeded the output limit; choose fewer pages or a shorter question".into())),
+        let reason = choice.get("finish_reason").and_then(Value::as_str);
+        match reason {
+            Some("stop") | Some("length") | None => {}
             _ => return Err(AiError::BadResponse("provider did not finish a text answer (refusal or unsupported tool call)".into())),
         }
-        let answer = choice
-            .pointer("/message/content")
-            .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| AiError::BadResponse("provider returned no text; check the model or reduce the context".into()))?;
+        let answer = choice.pointer("/message/content").and_then(Value::as_str).unwrap_or("");
+        if answer.trim().is_empty() {
+            return Err(AiError::BadResponse(if reason == Some("length") {
+                "answer exceeded the output limit; choose fewer pages or a shorter question".into()
+            } else {
+                "provider returned no text; check the model or reduce the context".into()
+            }));
+        }
+        // A stop at the output limit still has the text already written. Keep it.
         // A malicious or misconfigured endpoint can reflect Authorization into its answer.
-        Ok(if self.key.is_empty() { answer.into() } else { answer.replace(self.key.as_str(), "[API key removed]") })
+        Ok(self.redact(answer))
     }
+
+    fn redact(&self, text: &str) -> String {
+        if self.key.is_empty() { text.to_string() } else { text.replace(self.key.as_str(), "[API key removed]") }
+    }
+}
+
+struct StreamAccum<'a> {
+    raw_body: &'a mut String,
+    content: &'a mut String,
+    sse: &'a mut Option<bool>,
+    stopped_for_length: &'a mut bool,
+    shown: &'a mut String,
 }
 
 fn network_error(_: ureq::Error) -> AiError {
@@ -99,26 +132,56 @@ fn network_error(_: ureq::Error) -> AiError {
 }
 
 impl OpenAiProvider {
-    fn post_completion(&mut self, messages: Vec<Value>, opts: &GenOpts) -> Result<String, AiError> {
+    fn completion_body(&self, messages: Vec<Value>, stream: bool) -> Result<Value, AiError> {
         if let Err(e) = self.config.require_model() {
             return Err(AiError::Rejected(e));
         }
-        let mut body = json!({"model": self.config.model.trim(), "messages": messages, "stream": false});
-        // Omitting temperature supports reasoning models which reject sampler parameters.
-        let limit = if self.config.legacy_max_tokens { "max_tokens" } else { "max_completion_tokens" };
-        body[limit] = json!(opts.max_tokens.clamp(1, 8192));
-        let mut req = Self::agent().post(self.url("chat/completions")?);
+        // No max_tokens or max_completion_tokens. The provider stops at its own context window.
+        // Temperature is omitted because reasoning models reject sampler parameters.
+        Ok(json!({"model": self.config.model.trim(), "messages": messages, "stream": stream}))
+    }
+
+    fn send_completion(&self, body: Value) -> Result<ureq::http::Response<ureq::Body>, AiError> {
+        let mut req = Self::completion_agent().post(self.url("chat/completions")?);
         if !self.key.is_empty() {
             req = req.header("Authorization", format!("Bearer {}", self.key.as_str()));
         }
-        let response = req.send_json(body).map_err(network_error)?;
-        self.answer(self.response(response, false)?)
+        req.send_json(body).map_err(network_error)
     }
 
-    /// Multi-turn `/chat/completions` body. Document text belongs in the first user message.
-    /// Pictures use OpenAI vision `image_url` data URLs only when a turn has them, so text-only
-    /// servers keep a string `content`.
-    pub fn complete_chat(&mut self, messages: &[ChatMessage]) -> Result<String, AiError> {
+    fn post_completion(&mut self, messages: Vec<Value>) -> Result<String, AiError> {
+        let body = self.completion_body(messages, false)?;
+        let response = self.send_completion(body)?;
+        self.completion_text(response)
+    }
+
+    /// A chat body that is a completion is returned as its text. Anything else that arrived,
+    /// including a body that is not JSON, is the answer itself.
+    fn completion_text(&self, mut response: ureq::http::Response<ureq::Body>) -> Result<String, AiError> {
+        let code = response.status().as_u16();
+        if !(200..300).contains(&code) {
+            return Err(AiError::Rejected(format!("HTTP {code}: {}.", Self::status_help(code, false))));
+        }
+        let bytes =
+            response.body_mut().with_config().limit(u64::MAX).read_to_vec().map_err(|_| AiError::BadResponse("response unreadable".into()))?;
+        let text = String::from_utf8_lossy(&bytes);
+        self.text_or_completion(text.trim())
+    }
+
+    fn text_or_completion(&self, text: &str) -> Result<String, AiError> {
+        if let Ok(value) = serde_json::from_str::<Value>(text)
+            && value.pointer("/choices/0").is_some()
+        {
+            return self.answer(value);
+        }
+        let shown = self.redact(text);
+        if shown.trim().is_empty() {
+            return Err(AiError::BadResponse("provider returned no text; check the model or reduce the context".into()));
+        }
+        Ok(shown)
+    }
+
+    fn chat_payload(&self, messages: &[ChatMessage]) -> Result<Vec<Value>, AiError> {
         let mut total = 0usize;
         for message in messages {
             if !matches!(message.role.as_str(), "system" | "user" | "assistant") {
@@ -133,8 +196,199 @@ impl OpenAiProvider {
         if messages.is_empty() || total > super::MAX_TEXT_BYTES + super::MAX_HISTORY_BYTES + 2048 + image_budget {
             return Err(AiError::Rejected("request exceeds the text limit".into()));
         }
-        let payload = messages.iter().map(message_json).collect::<Result<Vec<_>, _>>()?;
-        self.post_completion(payload, &GenOpts::default())
+        messages.iter().map(message_json).collect()
+    }
+
+    /// Multi-turn `/chat/completions` body. Document text belongs in the first user message.
+    /// Pictures use OpenAI vision `image_url` data URLs only when a turn has them, so text-only
+    /// servers keep a string `content`. This waits for the full answer.
+    pub fn complete_chat(&mut self, messages: &[ChatMessage]) -> Result<String, AiError> {
+        let payload = self.chat_payload(messages)?;
+        self.post_completion(payload)
+    }
+
+    /// When streaming is enabled, `on_text` receives the visible answer as it arrives and the
+    /// returned string is still the full reply. When streaming is off, `on_text` is not called.
+    pub fn complete_chat_reporting<F>(&mut self, messages: &[ChatMessage], kind: StreamKind, on_text: &mut F) -> Result<String, AiError>
+    where
+        F: FnMut(&str),
+    {
+        let payload = self.chat_payload(messages)?;
+        if !self.config.stream_responses {
+            return self.post_completion(payload);
+        }
+        let body = self.completion_body(payload, true)?;
+        let response = self.send_completion(body)?;
+        self.read_stream(response, kind, on_text)
+    }
+
+    fn read_stream<F>(&self, mut response: ureq::http::Response<ureq::Body>, kind: StreamKind, on_text: &mut F) -> Result<String, AiError>
+    where
+        F: FnMut(&str),
+    {
+        let code = response.status().as_u16();
+        if !(200..300).contains(&code) {
+            return Err(AiError::Rejected(format!("HTTP {code}: {}.", Self::status_help(code, false))));
+        }
+        on_text("");
+        // Invalid bytes are shown as text. A size limit here used to discard a long reply.
+        let reader = response.body_mut().with_config().limit(u64::MAX).lossy_utf8(true).reader();
+        let mut reader = std::io::BufReader::new(reader);
+        let mut line = String::new();
+        let mut raw_body = String::new();
+        let mut content = String::new();
+        let mut shown = String::new();
+        let mut sse = None;
+        let mut stopped_for_length = false;
+        let mut failure = None;
+        loop {
+            line.clear();
+            let mut accum = StreamAccum {
+                raw_body: &mut raw_body,
+                content: &mut content,
+                sse: &mut sse,
+                stopped_for_length: &mut stopped_for_length,
+                shown: &mut shown,
+            };
+            // A dropped connection keeps every piece already shown.
+            if reader.read_line(&mut line).is_err() {
+                if !line.is_empty() {
+                    let _ = self.accept_stream_line(&line, &mut accum, kind, on_text);
+                }
+                break;
+            }
+            if line.is_empty() {
+                break;
+            }
+            if let Err(err) = self.accept_stream_line(&line, &mut accum, kind, on_text) {
+                failure = Some(err);
+                break;
+            }
+            if line.trim() == "data: [DONE]" {
+                break;
+            }
+        }
+        if sse != Some(true) {
+            return self.deliver_body(raw_body.trim(), kind, on_text);
+        }
+        if !content.trim().is_empty() {
+            return Ok(self.redact(&content));
+        }
+        if let Some(err) = failure {
+            return Err(err);
+        }
+        if stopped_for_length {
+            return Err(AiError::BadResponse("answer exceeded the output limit; choose fewer pages or a shorter question".into()));
+        }
+        Err(AiError::BadResponse("provider returned no text; check the model or reduce the context".into()))
+    }
+
+    /// One line of a streamed body. A server that ignores streaming is buffered until the end.
+    /// A `data:` line that is not JSON is appended as text.
+    fn accept_stream_line<F>(&self, line: &str, accum: &mut StreamAccum<'_>, kind: StreamKind, on_text: &mut F) -> Result<(), AiError>
+    where
+        F: FnMut(&str),
+    {
+        if *accum.sse != Some(true) {
+            accum.raw_body.push_str(line);
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        if accum.sse.is_none() {
+            *accum.sse = Some(trimmed.starts_with("data:"));
+        }
+        if *accum.sse != Some(true) {
+            return Ok(());
+        }
+        let Some(data) = trimmed.strip_prefix("data:") else { return Ok(()) };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return Ok(());
+        }
+        if serde_json::from_str::<Value>(data).is_err() {
+            Self::append_plain(accum.content, data);
+            self.show_content(accum.content, kind, accum.shown, on_text);
+            return Ok(());
+        }
+        match self.push_stream_chunk(data, accum.content, accum.stopped_for_length, kind, accum.shown, on_text) {
+            Ok(()) => Ok(()),
+            // A refusal after text has already arrived keeps that text.
+            Err(_) if !accum.content.trim().is_empty() => Ok(()),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn append_plain(content: &mut String, data: &str) {
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(data);
+    }
+
+    fn deliver_body<F>(&self, raw: &str, kind: StreamKind, on_text: &mut F) -> Result<String, AiError>
+    where
+        F: FnMut(&str),
+    {
+        let answer = self.text_or_completion(raw)?;
+        let mut shown = String::new();
+        self.show_content(&answer, kind, &mut shown, on_text);
+        Ok(answer)
+    }
+
+    fn show_content<F>(&self, content: &str, kind: StreamKind, shown: &mut String, on_text: &mut F)
+    where
+        F: FnMut(&str),
+    {
+        let next = self.redact(&match kind {
+            StreamKind::Plain => content.to_string(),
+            StreamKind::Answer => visible_stream_text(content),
+        });
+        if !next.is_empty() && next != *shown {
+            *shown = next;
+            on_text(shown);
+        }
+    }
+
+    fn push_stream_chunk<F>(
+        &self,
+        data: &str,
+        content: &mut String,
+        stopped_for_length: &mut bool,
+        kind: StreamKind,
+        shown: &mut String,
+        on_text: &mut F,
+    ) -> Result<(), AiError>
+    where
+        F: FnMut(&str),
+    {
+        let value: Value = serde_json::from_str(data).map_err(|_| AiError::BadResponse("expected a JSON response".into()))?;
+        if value.get("error").is_some() {
+            return Err(AiError::BadResponse("provider did not finish a text answer (refusal or unsupported tool call)".into()));
+        }
+        match value.pointer("/choices/0/finish_reason").and_then(Value::as_str) {
+            Some("stop") | None => {}
+            Some("length") => *stopped_for_length = true,
+            _ => return Err(AiError::BadResponse("provider did not finish a text answer (refusal or unsupported tool call)".into())),
+        }
+        if let Some(piece) = value.pointer("/choices/0/delta/content").and_then(Value::as_str) {
+            content.push_str(piece);
+        } else if let Some(full) = value.pointer("/choices/0/message/content").and_then(Value::as_str)
+            && (content.is_empty() || full.starts_with(content.as_str()))
+        {
+            content.clear();
+            content.push_str(full);
+        }
+        let next = self.redact(&match kind {
+            StreamKind::Plain => content.clone(),
+            StreamKind::Answer => visible_stream_text(content),
+        });
+        if !next.is_empty() && next != *shown {
+            *shown = next;
+            on_text(shown);
+        }
+        Ok(())
     }
 }
 
@@ -158,11 +412,11 @@ impl Provider for OpenAiProvider {
         "OpenAI-compatible".into()
     }
 
-    fn complete(&mut self, prompt: &str, opts: &GenOpts) -> Result<String, AiError> {
+    fn complete(&mut self, prompt: &str, _opts: &GenOpts) -> Result<String, AiError> {
         if prompt.len() > super::MAX_TEXT_BYTES + super::MAX_PROMPT_BYTES + 2048 {
             return Err(AiError::Rejected("request exceeds the text limit".into()));
         }
-        self.post_completion(vec![json!({"role": "user", "content": prompt})], opts)
+        self.post_completion(vec![json!({"role": "user", "content": prompt})])
     }
 
     fn test(&mut self) -> Result<ProviderInfo, AiError> {

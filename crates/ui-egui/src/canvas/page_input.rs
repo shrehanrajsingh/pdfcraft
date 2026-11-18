@@ -946,6 +946,35 @@ fn javascript_link(l: &pdfcraft_render::Link) -> Option<(usize, usize)> {
     matches!(l.target, LinkTarget::JavaScript(_)).then_some((l.page, l.index))
 }
 
+/// Fade every box of a cited span for two seconds. View space, so zoom uses the page transform.
+fn paint_citation_flash(ui: &egui::Ui, view: &mut DocView, page: usize, xf: &PageXform, painter: &egui::Painter) {
+    let Some((flash_page, rects, started)) = view.citation_flash.clone() else { return };
+    if flash_page != page {
+        return;
+    }
+    let now = ui.input(|inp| inp.time);
+    let started = if started == 0.0 { now } else { started };
+    let Some(alpha) = super::citation_flash_alpha((now - started) as f32) else {
+        view.citation_flash = None;
+        return;
+    };
+    view.citation_flash = Some((flash_page, rects.clone(), started));
+    for rect in &rects {
+        if !rect.iter().all(|value| value.is_finite()) {
+            continue;
+        }
+        let screen = xf.view_rect(*rect).expand(3.0);
+        painter.rect_filled(screen, CornerRadius::same(2), Color32::from_rgba_unmultiplied(0x1B, 0x63, 0xE0, alpha / 5));
+        painter.rect_stroke(
+            screen,
+            CornerRadius::same(3),
+            Stroke::new(2.0, Color32::from_rgba_unmultiplied(0x1B, 0x63, 0xE0, alpha)),
+            egui::StrokeKind::Outside,
+        );
+    }
+    ui.ctx().request_repaint();
+}
+
 /// Everything drawn over the page after its text: pictures, comments, content, links, fields, marks
 /// and badges.
 pub(super) fn page_overlays(ui: &mut egui::Ui, view: &mut DocView, frame: &mut PageFrame<'_>, slot: &PageSlot, input: &PageInput) {
@@ -1097,6 +1126,7 @@ pub(super) fn page_overlays(ui: &mut egui::Ui, view: &mut DocView, frame: &mut P
             view.flash = None;
         }
     }
+    paint_citation_flash(ui, view, i, &xf, painter);
     // The sign tabs (above). Like the validation badges, they never enter the file,
     // exports or printing.
     for tab in &input.sign_tabs {

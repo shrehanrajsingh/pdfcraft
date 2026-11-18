@@ -80,3 +80,23 @@ fn ai_preview_extracts_text_and_network_tools_need_explicit_consent() {
         .to_string();
     assert!(bad_image.contains("image") || bad_image.contains("AI assistant is off"), "{bad_image}");
 }
+
+#[test]
+fn ai_index_and_search_return_stable_span_boxes_without_a_provider() {
+    let dir = tmp("index");
+    std::fs::write(dir.join("source.pdf"), fixture()).unwrap();
+    let mut a = Automation::new().with_root(&dir).unwrap();
+    let doc = json_out(a.call("doc_open", &json!({"path":"source.pdf"}))).unwrap()["doc"].as_u64().unwrap();
+    let index = json_out(a.call("ai_index", &json!({"doc":doc}))).unwrap();
+    let spans = index["pages"][0]["spans"].as_array().unwrap();
+    assert!(spans.iter().any(|span| span["text"].as_str().unwrap().contains("Synthetic report")), "{spans:?}");
+    let id = spans[0]["id"].as_str().unwrap();
+    assert!(id.starts_with("p1-g"), "{id}");
+    assert!(!spans[0]["rects"].as_array().unwrap().is_empty());
+    let again = json_out(a.call("ai_index", &json!({"doc":doc}))).unwrap();
+    assert_eq!(again["pages"][0]["spans"][0]["id"], id);
+    let hits = json_out(a.call("ai_search", &json!({"doc":doc,"query":"revenue"}))).unwrap();
+    let found = hits["hits"].as_array().unwrap();
+    assert!(found.iter().any(|hit| hit["text"].as_str().unwrap().to_ascii_lowercase().contains("revenue")), "{found:?}");
+    assert!(!found[0]["rects"].as_array().unwrap().is_empty());
+}

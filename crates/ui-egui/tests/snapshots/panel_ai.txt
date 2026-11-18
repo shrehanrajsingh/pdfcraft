@@ -10,5 +10,4 @@ Label = "API key (optional for local servers)"
 PasswordInput "API key (optional for local servers)"
 Label = "Paste the key here. It stays in memory for this session and is never saved in preferences."
 Button "Clear API key"
-CheckBox "Use legacy max_tokens (older compatible servers)" [off]
 Button "Test connection" [disabled]

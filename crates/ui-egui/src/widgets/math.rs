@@ -57,7 +57,20 @@ pub(super) fn show(ui: &mut egui::Ui, latex: &str, display: bool) {
 }
 
 fn paint(ui: &mut egui::Ui, entry: &Entry, _display: bool) {
-    ui.add(egui::Image::new((entry.texture.id(), entry.size)));
+    // Fit the answer column, not the gap left on the current line. A formula wider than
+    // that column shrinks; a shorter one keeps its size and the line can wrap before it.
+    let column = ui.max_rect().width();
+    let column = if column.is_finite() && column > 1.0 { column } else { ui.available_width() };
+    ui.add(egui::Image::new((entry.texture.id(), fitted_size(entry.size, column))));
+}
+
+/// Width of a formula inside the answer column. A wider image keeps its shape and fits the pane.
+fn fitted_size(natural: Vec2, available: f32) -> Vec2 {
+    if available.is_finite() && available > 1.0 && natural.x > available && natural.x.is_finite() && natural.x > 0.0 {
+        natural * (available / natural.x)
+    } else {
+        natural
+    }
 }
 
 fn cache_key(latex: &str, display: bool, color: Color32, dpr: f32) -> u64 {
@@ -133,6 +146,28 @@ mod tests {
         assert!(image.width() > 8 && image.height() > 8, "{}x{}", image.width(), image.height());
         let opaque = image.pixels.iter().filter(|p| p.a() > 8).count();
         assert!(opaque > 16, "expected inked pixels, got {opaque}");
+    }
+
+    #[test]
+    fn a_wide_formula_stays_inside_a_narrow_column() {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(220.0, 400.0))), ..Default::default() };
+        let mut width = 0.0f32;
+        let output = ctx.run_ui(input, |ui| {
+            super::show(ui, r"f(x+1,y)+f(x-1,y)+f(x,y+1)+f(x,y-1)-4f(x,y)", false);
+            width = ui.min_rect().width();
+        });
+        output.drop_without_applying_deltas();
+        assert!(width <= 221.0, "formula width {width} exceeds the 220 column");
+    }
+
+    #[test]
+    fn a_wide_formula_fits_the_answer_column() {
+        let fitted = super::fitted_size(egui::vec2(640.0, 32.0), 280.0);
+        assert!((fitted.x - 280.0).abs() < 0.01, "{}", fitted.x);
+        assert!((fitted.y - 14.0).abs() < 0.01, "{}", fitted.y);
+        assert_eq!(super::fitted_size(egui::vec2(100.0, 20.0), 280.0), egui::vec2(100.0, 20.0));
+        assert_eq!(super::fitted_size(egui::vec2(640.0, 32.0), f32::INFINITY), egui::vec2(640.0, 32.0));
     }
 
     #[test]

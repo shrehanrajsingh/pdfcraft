@@ -54,6 +54,8 @@ impl Automation {
         let a = Args(args);
         let out = match name {
             "ai_preview" => self.ai_preview(&a)?,
+            "ai_index" => self.ai_index(&a)?,
+            "ai_search" => self.ai_search(&a)?,
             "ai_chat" => self.ai_chat(&a)?,
             "ai_summary" | "ai_ask" | "ai_translate" | "ai_provider_test" => self.ai_request(name, &a)?,
             "doc_bates_multi" => self.doc_bates_multi(&a)?,

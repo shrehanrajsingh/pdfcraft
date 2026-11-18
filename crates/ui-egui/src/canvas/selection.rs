@@ -401,6 +401,9 @@ impl DocView {
 
 #[derive(Clone, Copy)]
 enum SelectionAction {
+    Ask,
+    Explain,
+    Summarize,
     Note,
     Markup(comments::CommentTool),
     Replace,
@@ -408,7 +411,7 @@ enum SelectionAction {
 }
 
 /// The selection bar's width before it has been laid out once (English labels).
-const SELECTION_BAR_GUESS: f32 = 520.0;
+const SELECTION_BAR_GUESS: f32 = 820.0;
 
 /// Edits that each add a page's part of something marked on a text selection, as one undo step:
 /// the edit itself for one page, a batch named like it for several. For edits whose label has no
@@ -435,6 +438,26 @@ pub(super) fn bar_anchor(selection: &Selection, texts: &[(usize, &Arc<PageText>)
         rect.map(|r| (head_page, *r))
     });
     at_head.or_else(|| texts.iter().rev().find_map(|(p, t)| selection.rects_on(*p, t).last().map(|r| (*p, *r))))
+}
+
+fn ask_from_selection(view: &DocView, task_name: &'static str, region: bool) -> Option<super::SelectionAsk> {
+    let selection = view.selection?;
+    let text = view.selected_text()?;
+    let texts = view.selection_texts()?;
+    let mut ranges = Vec::new();
+    let mut rect = None;
+    if let Span::Column { rect: column } = selection.span {
+        rect = Some(column);
+    } else {
+        for (page, page_text) in &texts {
+            if let Some(range) = selection.run_on(*page, page_text.glyphs.len())
+                && !range.is_empty()
+            {
+                ranges.push((*page, range.start, range.end));
+            }
+        }
+    }
+    Some(super::SelectionAsk { task_name, region, page: selection.head_page(), text, ranges, rect })
 }
 
 /// Actions on an existing text selection, next to the selected words.
@@ -479,7 +502,12 @@ pub(super) fn selection_actions(
     egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(pos2(x, y)).show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.horizontal(|ui| {
+                let region = matches!(selection.span, Span::Column { .. });
+                let ask = if region { tl!("Ask about this region") } else { tl!("Ask AI") };
                 for (label, action) in [
+                    (ask, SelectionAction::Ask),
+                    (tl!("Explain"), SelectionAction::Explain),
+                    (tl!("Summarize"), SelectionAction::Summarize),
                     (tl!("Add comment"), SelectionAction::Note),
                     (tl!("Highlight"), SelectionAction::Markup(comments::CommentTool::Highlight)),
                     (tl!("Underline"), SelectionAction::Markup(comments::CommentTool::Underline)),
@@ -498,6 +526,20 @@ pub(super) fn selection_actions(
         });
     });
     let Some(action) = chosen else { return false };
+    if matches!(action, SelectionAction::Ask | SelectionAction::Explain | SelectionAction::Summarize) {
+        let task_name = match action {
+            SelectionAction::Explain => "explain",
+            SelectionAction::Summarize => "summarize",
+            _ => "ask",
+        };
+        let region = matches!(selection.span, Span::Column { .. });
+        if let Some(ask) = ask_from_selection(view, task_name, region) {
+            view.selection_ask = Some(ask);
+        }
+        // The bar closes. The words stay selected, so a later click does not drop them.
+        view.actions_dismissed = Some(selection);
+        return false;
+    }
     if let SelectionAction::Copy = action {
         // Copying closes the bar but keeps the words selected, for ⌘C or a second action.
         view.actions_dismissed = Some(selection);
@@ -538,7 +580,7 @@ pub(super) fn selection_actions(
             view.pending_edit = view.selection_marks_edit(edits.collect(), selection.head_page());
         }
         // Copy is dispatched through the app after the view borrow ends.
-        SelectionAction::Copy => {}
+        SelectionAction::Copy | SelectionAction::Ask | SelectionAction::Explain | SelectionAction::Summarize => {}
     }
     false
 }

@@ -236,9 +236,9 @@ mod tests {
     #[test]
     fn validate_images_bounds_turns_and_roles() {
         let png = ChatImage::from_encoded(rgb_png(2, 2)).unwrap();
-        let user = Turn { role: super::super::Role::User, text: "see this".into(), images: vec![png.clone()] };
+        let user = Turn { role: super::super::Role::User, text: "see this".into(), images: vec![png.clone()], citations: Vec::new() };
         validate_images(std::slice::from_ref(&user), &[]).unwrap();
-        let assistant = Turn { role: super::super::Role::Assistant, text: "ok".into(), images: vec![png.clone()] };
+        let assistant = Turn { role: super::super::Role::Assistant, text: "ok".into(), images: vec![png.clone()], citations: Vec::new() };
         assert!(validate_images(&[assistant], &[]).unwrap_err().contains("user"));
         let many = vec![png.clone(); MAX_CHAT_IMAGES_PER_TURN + 1];
         assert!(validate_images(&[], &many).is_err());

@@ -13,8 +13,133 @@ pub(crate) struct Cache {
     inner: CommonMarkCache,
 }
 
+/// A checked citation the answer can point at.
+pub(crate) struct CiteRef<'a> {
+    pub id: &'a str,
+    /// 1-based page number.
+    pub page: usize,
+    pub quote: &'a str,
+    pub page_level: bool,
+}
+
+/// Draw markdown, turning `[c1]` and `[Page N]` into buttons when `cites` knows them.
+/// Returns the id of a citation the user clicked.
+pub(crate) fn show_cited(ui: &mut egui::Ui, cache: &mut Cache, markdown: &str, cites: &[CiteRef<'_>]) -> Option<String> {
+    let mut clicked = None;
+    for piece in pieces(markdown) {
+        match piece {
+            Piece::Text(text) => {
+                if !text.trim().is_empty() {
+                    show(ui, cache, text);
+                }
+            }
+            Piece::Cite { lookup, label } => {
+                let known = match lookup {
+                    Lookup::Id(id) => cites.iter().find(|cite| cite.id == id),
+                    Lookup::Page(page) => cites.iter().find(|cite| cite.id == format!("page-{page}")),
+                };
+                let response = ui.small_button(label);
+                if let Some(cite) = known {
+                    response.clone().on_hover_ui(|ui| {
+                        ui.label(format!("Page {}", cite.page));
+                        if cite.page_level {
+                            ui.label("Page-level location. The exact passage box was not available.");
+                        }
+                        if !cite.quote.is_empty() {
+                            ui.label(cite.quote);
+                        }
+                    });
+                    if response.clicked() {
+                        clicked = Some(cite.id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    clicked
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lookup<'a> {
+    Id(&'a str),
+    Page(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Piece<'a> {
+    Text(&'a str),
+    Cite { lookup: Lookup<'a>, label: &'a str },
+}
+
+/// Split citation markers that sit outside code. `[c1]` looks up `c1`. `[Page 3]` looks up `page-3`.
+fn pieces(markdown: &str) -> Vec<Piece<'_>> {
+    let mut out = Vec::new();
+    let bytes = markdown;
+    let mut rest = bytes;
+    let mut at_line = true;
+    let mut text_from = bytes;
+    while !rest.is_empty() {
+        if at_line && let Some((_taken, after)) = take_fenced(rest) {
+            rest = after;
+            at_line = rest.starts_with('\n') || rest.is_empty();
+            continue;
+        }
+        if let Some((_taken, after)) = take_inline_code(rest) {
+            rest = after;
+            at_line = false;
+            continue;
+        }
+        if let Some((lookup, label, after)) = citation_at(rest) {
+            push_text(&mut out, bytes, text_from, rest);
+            out.push(Piece::Cite { lookup, label });
+            rest = after;
+            text_from = rest;
+            at_line = false;
+            continue;
+        }
+        let Some(ch) = rest.chars().next() else { break };
+        rest = rest.get(ch.len_utf8()..).unwrap_or("");
+        at_line = ch == '\n';
+    }
+    push_text(&mut out, bytes, text_from, rest);
+    out
+}
+
+fn push_text<'a>(out: &mut Vec<Piece<'a>>, markdown: &'a str, from: &'a str, until: &str) {
+    let end = markdown.len().saturating_sub(until.len());
+    let start = markdown.len().saturating_sub(from.len());
+    if let Some(text) = markdown.get(start..end)
+        && !text.is_empty()
+    {
+        out.push(Piece::Text(text));
+    }
+}
+
+fn citation_at(rest: &str) -> Option<(Lookup<'_>, &str, &str)> {
+    if let Some(after) = rest.strip_prefix("[c") {
+        let digits = after.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        if digits > 0 && after.get(digits..).is_some_and(|tail| tail.starts_with(']')) {
+            let id_end = 2usize.saturating_add(digits);
+            let end = id_end.saturating_add(1);
+            return Some((Lookup::Id(rest.get(1..id_end)?), rest.get(..end)?, rest.get(end..)?));
+        }
+    }
+    let after = rest.strip_prefix("[Page ")?;
+    let digits = after.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digits == 0 || !after.get(digits..).is_some_and(|tail| tail.starts_with(']')) {
+        return None;
+    }
+    let page = after.get(..digits)?.parse::<usize>().ok()?;
+    let end = "[Page ".len().saturating_add(digits).saturating_add(1);
+    Some((Lookup::Page(page), rest.get(..end)?, rest.get(end..)?))
+}
+
 /// Draw parsed CommonMark. Links keep their destinations; they are not rewritten.
 pub(crate) fn show(ui: &mut egui::Ui, cache: &mut Cache, markdown: &str) {
+    let width = ui.available_width();
+    if width.is_finite() && width > 1.0 {
+        ui.set_max_width(width);
+    }
     let prepared = with_tex_delimiters(markdown);
     let math_fn = |ui: &mut egui::Ui, tex: &str, inline: bool| {
         math::show(ui, tex, !inline);
@@ -194,6 +319,18 @@ mod tests {
         let prepared = with_tex_delimiters("use `$x$` and [Page 1]\n");
         let math = Parser::new_ext(&prepared, Options::ENABLE_TABLES | Options::ENABLE_MATH).any(|e| matches!(e, Event::InlineMath(_)));
         assert!(!math, "{prepared}");
+    }
+
+    #[test]
+    fn citation_markers_split_outside_code() {
+        let parts = super::pieces("See [c1] and [Page 2]. `not [c9]`\n");
+        assert!(parts.iter().any(|part| matches!(part, super::Piece::Cite { lookup: super::Lookup::Id("c1"), .. })), "{parts:?}");
+        assert!(parts.iter().any(|part| matches!(part, super::Piece::Cite { lookup: super::Lookup::Page(2), .. })), "{parts:?}");
+        let code = parts.iter().find_map(|part| match part {
+            super::Piece::Text(text) if text.contains("[c9]") => Some(*text),
+            _ => None,
+        });
+        assert!(code.is_some(), "{parts:?}");
     }
 
     #[test]
