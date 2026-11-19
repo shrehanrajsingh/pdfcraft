@@ -15,7 +15,9 @@ mod index;
 mod retrieve;
 #[cfg(not(target_arch = "wasm32"))]
 pub use agent::complete_evidence;
-pub use agent::{AgentAnswer, Citation, ImageChoice, ViewerAction, evidence_messages, image_choice, prepare_pack, verify_reply};
+pub use agent::{
+    AgentAnswer, Citation, ImageChoice, PageNotebook, ViewerAction, evidence_messages, image_choice, pages_named_in, prepare_pack, verify_reply,
+};
 pub use image::{ChatImage, ChatImageKind, ChatMessage};
 pub use index::{OutlineEntry, PageIndex, Span, SpanKind};
 pub use retrieve::{EvidencePack, EvidenceRequest, Focus};

@@ -4,7 +4,10 @@ use crate::{Dialog, PdfCraftApp, RightPanel, icons, widgets};
 use egui::{Align, CornerRadius, Layout, RichText, Stroke};
 use pdfcraft_engine::{
     DocId,
-    ai::{self, AgentAnswer, ChatImage, Config, EvidencePack, EvidenceRequest, Focus, ImageChoice, Prepared, Role, Task, Turn, ViewerAction},
+    ai::{
+        self, AgentAnswer, ChatImage, Config, EvidencePack, EvidenceRequest, Focus, ImageChoice, PageNotebook, Prepared, Role, Task, Turn,
+        ViewerAction,
+    },
 };
 use std::sync::{Arc, Mutex, PoisonError};
 use zeroize::Zeroizing;
@@ -64,6 +67,8 @@ pub(crate) struct Assistant {
     starter_images: Vec<ChatImage>,
     /// Retrieved passages for Ask and Summarize. Translate keeps using `preview` alone.
     evidence: Option<EvidencePack>,
+    /// Pages a tool or a named range has already read. Kept for later messages in this chat.
+    notebook: PageNotebook,
     /// Page or region rasters that the preview said would be sent.
     page_images: Vec<ChatImage>,
     image_note: String,
@@ -109,6 +114,7 @@ impl Assistant {
         self.status.clear();
         self.starter_images.clear();
         self.evidence = None;
+        self.notebook = PageNotebook::default();
         self.page_images.clear();
         self.image_note.clear();
         self.follow_ups.clear();
@@ -288,6 +294,7 @@ impl PdfCraftApp {
                         }
                         let citations = answer.citations.clone();
                         self.ai.follow_ups = answer.follow_ups.clone();
+                        self.ai.notebook = answer.notebook.clone();
                         self.ai.messages.push(user);
                         self.ai.messages.push(Turn { role: Role::Assistant, text: answer.answer.clone(), images: Vec::new(), citations });
                         self.ai.input.clear();
@@ -512,6 +519,14 @@ impl PdfCraftApp {
         let choice = if refresh { self.page_image_choice(&request) } else { ImageChoice::Off };
         let stored_pack = if refresh { None } else { self.ai.evidence.clone() };
         let stored_images = if refresh { Vec::new() } else { self.ai.page_images.clone() };
+        let mut notebook = self.ai.notebook.clone();
+        let image_block = if !self.ai.config.send_page_images {
+            Some("Page images are off. The text of those pages is included instead.")
+        } else if !self.ai.config.model_accepts_images {
+            Some("Page images were not sent because this model is not marked as accepting images. The text of those pages is included instead.")
+        } else {
+            None
+        };
         let task = self.ai.task;
         let user = Turn { role: Role::User, text: user_text, images: user_images.clone(), citations: Vec::new() };
         let extra_images = if turns.is_empty() { user_images } else { Vec::new() };
@@ -549,11 +564,15 @@ impl PdfCraftApp {
                 let base = request.clone();
                 let answer = ai::complete_evidence(
                     &mut provider,
+                    &source,
+                    &outline,
                     pack,
+                    &mut notebook,
                     task,
                     &starter,
                     &turns,
                     &images,
+                    image_block,
                     move |query| {
                         let mut again = base.clone();
                         again.question = query.to_string();
@@ -578,7 +597,7 @@ impl PdfCraftApp {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (source, outline, request, choice, stored_pack, stored_images, task, user, extra_images, turns, starter);
+            let _ = (source, outline, request, choice, stored_pack, stored_images, notebook, image_block, task, user, extra_images, turns, starter);
             Err("AI requests require the desktop app in this version.".into())
         }
     }

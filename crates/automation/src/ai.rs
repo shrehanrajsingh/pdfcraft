@@ -9,6 +9,17 @@ use pdfcraft_engine::ai::{AgentAnswer, EvidencePack, EvidenceRequest, Focus, Tas
 use pdfcraft_engine::ai::{Config, ImageChoice, Role, Turn};
 use serde_json::json;
 
+#[cfg(not(target_arch = "wasm32"))]
+fn image_block(send_images: bool, accepts_images: bool) -> Option<&'static str> {
+    if !send_images {
+        Some("Page images are off. The text of those pages is included instead.")
+    } else if !accepts_images {
+        Some("Page images were not sent because this model is not marked as accepting images. The text of those pages is included instead.")
+    } else {
+        None
+    }
+}
+
 impl Automation {
     fn ai_pages(&self, a: &Args) -> Result<Vec<usize>> {
         if a.get("pages").and_then(Value::as_array).is_some_and(|p| p.len() > ai::MAX_PAGES) {
@@ -97,13 +108,18 @@ impl Automation {
         let (source, outline, request) = self.evidence_request(a, task, &question)?;
         let choice = ai::image_choice(send_images, accepts_images, &request.question, request.focus.region.is_some());
         let (pack, images, note) = ai::prepare_pack(&source, &outline, &request, &choice).map_err(failed)?;
+        let mut notebook = ai::PageNotebook::default();
         let answer = ai::complete_evidence(
             &mut provider,
+            &source,
+            &outline,
             pack.clone(),
+            &mut notebook,
             task,
             input,
             &[],
             &images,
+            image_block(send_images, accepts_images),
             {
                 let source = source.clone();
                 let outline = outline.clone();
@@ -170,13 +186,18 @@ impl Automation {
             }
             images.push(image.clone());
         }
+        let mut notebook = ai::PageNotebook::default();
         let answer = ai::complete_evidence(
             &mut provider,
+            &source,
+            &outline,
             pack.clone(),
+            &mut notebook,
             task,
             input,
             &turns,
             &images,
+            image_block(send_images, accepts_images),
             {
                 let source = source.clone();
                 let outline = outline.clone();

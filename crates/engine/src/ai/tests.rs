@@ -139,6 +139,52 @@ mod http {
         (config, worker)
     }
 
+    fn server_queue(bodies: Vec<String>) -> (Config, std::thread::JoinHandle<Vec<String>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut config = Config {
+            enabled: true,
+            base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+            model: "test-model".into(),
+            ..Default::default()
+        };
+        config.stream_responses = false;
+        let worker = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for body in bodies {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+                let mut reader = BufReader::new(socket.try_clone().unwrap());
+                let mut request = String::new();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                    request.push_str(&line);
+                }
+                let mut payload = vec![0; length];
+                reader.read_exact(&mut payload).unwrap();
+                request.push_str("\r\n");
+                request.push_str(&String::from_utf8(payload).unwrap());
+                let response =
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).unwrap();
+                requests.push(request);
+            }
+            requests
+        });
+        (config, worker)
+    }
+
+    fn chat_json(content: &str) -> String {
+        serde_json::json!({"choices":[{"finish_reason":"stop","message":{"content": content}}]}).to_string()
+    }
+
     #[test]
     fn ai_http_round_trip_uses_bearer_model_and_page_context() {
         let (config, worker) = server("200 OK", r#"{"choices":[{"finish_reason":"stop","message":{"content":"Result [Page 3]"}}]}"#, "");
@@ -432,5 +478,68 @@ mod http {
         let request = worker.join().unwrap();
         let body: serde_json::Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn a_page_tool_is_fetched_and_kept_for_the_next_turn() {
+        let mut session = crate::Session::new();
+        let id = session.open("Pages", None, std::sync::Arc::new(crate::tests::fixture(2)), None).unwrap();
+        let document = session.get(id).unwrap();
+        let mut source = document.export_source();
+        source.config.system_fonts = false;
+        let outline = super::index::flatten_outline(&document.info.outline);
+        let marks = super::index::structure_marks(&source);
+        let span_id = super::index::page_index(&source, 0, &outline, &marks).unwrap().spans[0].id.clone();
+        let cited = format!(r#"{{"answer":"Page one [c1].","citations":[{{"id":"c1","span_id":"{span_id}"}}],"viewer_actions":[],"follow_ups":[]}}"#);
+        let (config, worker) = server_queue(vec![
+            chat_json(r#"{"tool":"get_pdf_page_text","pages":"1-2"}"#),
+            chat_json(&cited),
+            chat_json(r#"{"answer":"Still page one.","citations":[],"viewer_actions":[],"follow_ups":[]}"#),
+        ]);
+        let mut provider = OpenAiProvider::new(config, String::new()).unwrap();
+        let pack = EvidencePack { text: "Other.".into(), pages: vec![], spans: vec![], activities: vec![], notes: vec![] };
+        let mut notebook = PageNotebook::default();
+        let first = complete_evidence(
+            &mut provider,
+            &source,
+            &outline,
+            pack.clone(),
+            &mut notebook,
+            Task::Ask,
+            "Explain the design.",
+            &[],
+            &[],
+            None,
+            |_| Err("no search".into()),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        assert!(first.answer.contains("Page one"), "{}", first.answer);
+        assert_eq!(first.citations.first().map(|citation| citation.span_id.as_str()), Some(span_id.as_str()));
+        assert!(notebook.text.contains("Page 1"), "{}", notebook.text);
+        assert!(notebook.text.contains("Page 2"), "{}", notebook.text);
+        let turns = vec![Turn { role: Role::User, text: "What does the first page say?".into(), images: Vec::new(), citations: Vec::new() }];
+        let second = complete_evidence(
+            &mut provider,
+            &source,
+            &outline,
+            pack,
+            &mut notebook,
+            Task::Ask,
+            "Explain the design.",
+            &turns,
+            &[],
+            None,
+            |_| Err("no search".into()),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        assert!(second.answer.contains("Still page one"), "{}", second.answer);
+        let requests = worker.join().unwrap();
+        assert!(requests[1].contains("Page 1"), "{}", requests[1]);
+        assert!(requests[1].contains(&span_id), "{}", requests[1]);
+        assert!(requests[2].contains("Page 1"), "{}", requests[2]);
     }
 }

@@ -1,16 +1,19 @@
 //! Bounded question answering over retrieved spans. The model names span ids; this module
 //! drops any id the evidence set does not contain. Coordinates are copied from the index.
 //!
-//! At most three provider rounds. A round that asks for another search is the only retry, and
-//! it does not run unless the reply is a JSON object with `need` and no answer. There is no
-//! automatic retry of a failed request.
+//! At most five provider rounds. A round may ask for another keyword search (`need`) or for
+//! pages (`get_pdf_page_text`, `get_pdf_page_img`). A tool reply has no answer and is not shown.
+//! There is no automatic retry of a failed request.
 
 use super::image::ChatImage;
-use super::index::{Span, SpanKind};
+use super::index::{OutlineEntry, Span, SpanKind, page_index, structure_marks};
 #[cfg(test)]
 use super::retrieve::Focus;
 use super::retrieve::{EvidencePack, EvidenceRequest, gather};
-use super::{ChatMessage, MAX_CHAT_IMAGES_PER_TURN, MAX_HISTORY_BYTES, MAX_PROMPT_BYTES, MAX_TURNS, POLICY, Role, Task, Turn};
+use super::{
+    ChatMessage, MAX_CHAT_IMAGES, MAX_CHAT_IMAGES_PER_TURN, MAX_HISTORY_BYTES, MAX_PAGES, MAX_PROMPT_BYTES, MAX_TEXT_BYTES, MAX_TURNS, POLICY, Role,
+    Task, Turn,
+};
 use crate::Document;
 use crate::export::ExportSource;
 
@@ -42,6 +45,19 @@ pub struct AgentAnswer {
     pub follow_ups: Vec<String>,
     pub notes: Vec<String>,
     pub activities: Vec<String>,
+    /// Pages fetched during this conversation. The panel keeps this for the next message.
+    pub notebook: PageNotebook,
+}
+
+/// Pages the assistant has already read or drawn. Session-only, and not part of the visible chat.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PageNotebook {
+    pub spans: Vec<Span>,
+    pub text: String,
+    pub images: Vec<ChatImage>,
+    pub image_pages: Vec<usize>,
+    pub notes: Vec<String>,
+    loaded: Vec<usize>,
 }
 
 /// Whether page images may be rendered for this request.
@@ -55,7 +71,7 @@ pub enum ImageChoice {
     Send,
 }
 
-const FORMAT: &str = "Reply with one JSON object and no other text: {\"answer\":\"markdown, with [c1] markers when you cite the document\",\"citations\":[{\"id\":\"c1\",\"span_id\":\"the id in brackets before a block\"}],\"viewer_actions\":[],\"follow_ups\":[]}. Use a span id only when you are citing a passage, and only an id that appears in the evidence. viewer_actions may contain {\"type\":\"navigate\",\"page\":N} with a 1-based page that appears in the evidence, or {\"type\":\"highlight\",\"span_id\":\"...\"} for a cited span. If you need one more search of the document, reply {\"need\":\"short query\"} and nothing else. If the document does not cover the question, answer from your own knowledge.";
+const FORMAT: &str = "Reply with one JSON object and no other text: {\"answer\":\"markdown, with [c1] markers when you cite the document\",\"citations\":[{\"id\":\"c1\",\"span_id\":\"the id in brackets before a block\"}],\"viewer_actions\":[],\"follow_ups\":[]}. Use a span id only when you are citing a passage, and only an id that appears in the evidence. viewer_actions may contain {\"type\":\"navigate\",\"page\":N} with a 1-based page that appears in the evidence, or {\"type\":\"highlight\",\"span_id\":\"...\"} for a cited span. If you need one more search of the document, reply {\"need\":\"short query\"} and nothing else. To read pages before answering, reply with only {\"tool\":\"get_pdf_page_text\",\"pages\":\"348-373\"} or {\"tool\":\"get_pdf_page_img\",\"pages\":\"360\"}. pages is 1-based: a number, a range such as 348-373 or 348 to 373, or a list such as 348, 360. Use get_pdf_page_img when the page must be seen. After the pages are added, answer as usual. If the document does not cover the question, answer from your own knowledge.";
 
 const VISUAL: &[&str] = &["diagram", "figure", "graph", "chart", "image", "picture", "photo", "plot", "visual", "happening"];
 
@@ -201,6 +217,7 @@ pub fn verify_reply(raw: &str, pack: &EvidencePack) -> AgentAnswer {
                 follow_ups: Vec::new(),
                 notes: vec![bound_query(need)],
                 activities,
+                notebook: PageNotebook::default(),
             };
         }
         return verify_json(&value, pack, activities);
@@ -303,7 +320,7 @@ fn verify_json(value: &serde_json::Value, pack: &EvidencePack, mut activities: V
         notes.push("A source reference was removed because it did not match the document.".into());
     }
     activities.push("Preparing response".into());
-    AgentAnswer { answer: answer.trim().to_string(), citations, actions, follow_ups, notes, activities }
+    AgentAnswer { answer: answer.trim().to_string(), citations, actions, follow_ups, notes, activities, notebook: PageNotebook::default() }
 }
 
 fn verify_plain(raw: &str, pack: &EvidencePack, mut activities: Vec<String>) -> AgentAnswer {
@@ -353,7 +370,7 @@ fn verify_plain(raw: &str, pack: &EvidencePack, mut activities: Vec<String>) -> 
         notes.push("A source reference was removed because it did not match the document.".into());
     }
     activities.push("Preparing response".into());
-    AgentAnswer { answer, citations, actions: Vec::new(), follow_ups: Vec::new(), notes, activities }
+    AgentAnswer { answer, citations, actions: Vec::new(), follow_ups: Vec::new(), notes, activities, notebook: PageNotebook::default() }
 }
 
 fn citation_for(id: &str, span_id: &str, pack: &EvidencePack) -> Option<Citation> {
@@ -545,19 +562,513 @@ impl Document {
     }
 }
 
-/// Run the provider against evidence already gathered. `more` loads another search when the
-/// model asks for one, at most twice more. `on_partial` receives the visible answer while a
-/// streamed reply is still arriving; it is not called when streaming is off.
+/// 1-based page numbers named after "page", "pages", or "pp", in order and without duplicates.
+pub fn pages_named_in(text: &str) -> (Vec<usize>, bool) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut pages = Vec::new();
+    let mut limited = false;
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some(cue) = cue_len(&chars, index) {
+            let suffix: String = chars.get(index + cue..).unwrap_or(&[]).iter().collect();
+            let (found, cut) = parse_page_spec(&suffix);
+            limited |= cut;
+            for page in found {
+                if pages.len() >= MAX_PAGES {
+                    limited = true;
+                    break;
+                }
+                if !pages.contains(&page) {
+                    pages.push(page);
+                }
+            }
+            index = index.saturating_add(cue);
+        } else {
+            index = index.saturating_add(1);
+        }
+    }
+    (pages, limited)
+}
+
+/// A tool `pages` value: a number, a list, or text such as `348-373` or `348 to 373`.
+pub fn parse_page_spec(spec: &str) -> (Vec<usize>, bool) {
+    let chars: Vec<char> = spec.chars().collect();
+    let mut pages = Vec::new();
+    let mut limited = false;
+    let mut index = 0;
+    loop {
+        index = skip_separators(&chars, index);
+        if index >= chars.len() {
+            break;
+        }
+        let Some((start, next)) = read_number(&chars, index) else { break };
+        index = skip_space(&chars, next);
+        let end = if range_operator(&chars, index) {
+            index = skip_range_operator(&chars, index);
+            index = skip_space(&chars, index);
+            if let Some((number, next)) = read_number(&chars, index) {
+                index = next;
+                number
+            } else {
+                start
+            }
+        } else {
+            start
+        };
+        if !push_range(&mut pages, start, end) {
+            limited = true;
+            break;
+        }
+        if separator_before_number(&chars, index).is_none() {
+            break;
+        }
+    }
+    (pages, limited)
+}
+
+fn cue_len(chars: &[char], index: usize) -> Option<usize> {
+    if index > 0 && chars[index - 1].is_alphanumeric() {
+        return None;
+    }
+    for cue in ["pages", "page", "pp.", "pp"] {
+        let len = cue.chars().count();
+        let end = index.saturating_add(len);
+        let Some(got) = chars.get(index..end) else { continue };
+        if got.iter().collect::<String>().to_ascii_lowercase() != cue {
+            continue;
+        }
+        if chars.get(end).is_some_and(|ch| ch.is_alphanumeric()) {
+            continue;
+        }
+        return Some(len);
+    }
+    None
+}
+
+fn push_range(pages: &mut Vec<usize>, start: usize, end: usize) -> bool {
+    if start == 0 && end == 0 {
+        return true;
+    }
+    let (lo, hi) = if end < start { (end.max(1), start) } else { (start.max(1), end) };
+    let mut page = lo;
+    while page <= hi {
+        if pages.len() >= MAX_PAGES {
+            return false;
+        }
+        if !pages.contains(&page) {
+            pages.push(page);
+        }
+        if page == usize::MAX {
+            break;
+        }
+        page = page.saturating_add(1);
+    }
+    true
+}
+
+fn skip_space(chars: &[char], mut index: usize) -> usize {
+    while chars.get(index).is_some_and(|ch| ch.is_whitespace()) {
+        index = index.saturating_add(1);
+    }
+    index
+}
+
+fn skip_separators(chars: &[char], mut index: usize) -> usize {
+    loop {
+        index = skip_space(chars, index);
+        if chars.get(index) == Some(&',') {
+            index = index.saturating_add(1);
+            continue;
+        }
+        if let Some(next) = word_end(chars, index, "and") {
+            index = next;
+            continue;
+        }
+        break;
+    }
+    index
+}
+
+fn separator_before_number(chars: &[char], index: usize) -> Option<usize> {
+    let mut next = skip_space(chars, index);
+    if chars.get(next) == Some(&',') {
+        next = skip_space(chars, next.saturating_add(1));
+        read_number(chars, next)?;
+        return Some(next);
+    }
+    if let Some(after) = word_end(chars, next, "and") {
+        next = skip_space(chars, after);
+        read_number(chars, next)?;
+        return Some(next);
+    }
+    None
+}
+
+fn range_operator(chars: &[char], index: usize) -> bool {
+    matches!(chars.get(index), Some('-' | '–' | '—')) || word_end(chars, index, "to").is_some()
+}
+
+fn skip_range_operator(chars: &[char], index: usize) -> usize {
+    if let Some(after) = word_end(chars, index, "to") {
+        return after;
+    }
+    index.saturating_add(1)
+}
+
+fn word_end(chars: &[char], index: usize, word: &str) -> Option<usize> {
+    let word: Vec<char> = word.chars().collect();
+    let end = index.saturating_add(word.len());
+    let got = chars.get(index..end)?;
+    if got.iter().collect::<String>().to_ascii_lowercase() != word.iter().collect::<String>() {
+        return None;
+    }
+    if chars.get(end).is_some_and(|ch| ch.is_alphanumeric()) {
+        return None;
+    }
+    Some(end)
+}
+
+fn read_number(chars: &[char], index: usize) -> Option<(usize, usize)> {
+    if !chars.get(index).is_some_and(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let mut number: usize = 0;
+    let mut next = index;
+    while let Some(ch) = chars.get(next).filter(|ch| ch.is_ascii_digit()) {
+        let digit = usize::from(*ch as u8 - b'0');
+        number = number.saturating_mul(10).saturating_add(digit);
+        next = next.saturating_add(1);
+        if next - index > 9 {
+            break;
+        }
+    }
+    Some((number, next))
+}
+
+enum AskedTool {
+    Text { pages: Vec<usize>, limited: bool },
+    Image { pages: Vec<usize>, limited: bool },
+    Unknown,
+}
+
+fn asked_tool(raw: &str) -> Option<AskedTool> {
+    let text = strip_fence(raw);
+    if let Some(start) = json_string_at(text, "answer") {
+        let (answer, _) = take_json_string(text.get(start..)?);
+        if !answer.trim().is_empty() {
+            return None;
+        }
+    }
+    let key_at = json_string_at(text, "tool")?;
+    let brace = text.get(..key_at)?.rfind('{')?;
+    let value: serde_json::Value = serde_json::from_str(text.get(brace..)?).ok()?;
+    let name = value.get("tool").and_then(|item| item.as_str())?;
+    let (pages, limited) = pages_from_json(value.get("pages"));
+    match name {
+        "get_pdf_page_text" => Some(AskedTool::Text { pages, limited }),
+        "get_pdf_page_img" => Some(AskedTool::Image { pages, limited }),
+        _ => Some(AskedTool::Unknown),
+    }
+}
+
+fn pages_from_json(value: Option<&serde_json::Value>) -> (Vec<usize>, bool) {
+    match value {
+        Some(serde_json::Value::String(text)) => parse_page_spec(text),
+        Some(serde_json::Value::Number(number)) => number.as_u64().map(|page| parse_page_spec(&page.to_string())).unwrap_or_default(),
+        Some(serde_json::Value::Array(items)) => {
+            let mut pages = Vec::new();
+            let mut limited = false;
+            for item in items {
+                let (found, cut) = match item {
+                    serde_json::Value::String(text) => parse_page_spec(text),
+                    serde_json::Value::Number(number) => number.as_u64().map(|page| parse_page_spec(&page.to_string())).unwrap_or_default(),
+                    _ => (Vec::new(), false),
+                };
+                limited |= cut;
+                for page in found {
+                    if pages.len() >= MAX_PAGES {
+                        limited = true;
+                        break;
+                    }
+                    if !pages.contains(&page) {
+                        pages.push(page);
+                    }
+                }
+            }
+            (pages, limited)
+        }
+        _ => (Vec::new(), false),
+    }
+}
+
+fn format_pages(pages: &[usize]) -> String {
+    if pages.is_empty() {
+        return String::new();
+    }
+    let mut sorted = pages.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut groups = Vec::new();
+    let mut start = sorted[0];
+    let mut previous = sorted[0];
+    for page in sorted.iter().skip(1).copied() {
+        if page == previous.saturating_add(1) {
+            previous = page;
+            continue;
+        }
+        groups.push((start, previous));
+        start = page;
+        previous = page;
+    }
+    groups.push((start, previous));
+    let list = groups.iter().map(|(from, to)| if from == to { format!("{from}") } else { format!("{from}–{to}") }).collect::<Vec<_>>().join(", ");
+    if sorted.len() == 1 { format!("page {list}") } else { format!("pages {list}") }
+}
+
+fn remember_note(notebook: &mut PageNotebook, note: &str) {
+    let note = note.trim();
+    if note.is_empty() || notebook.notes.len() >= 8 || notebook.notes.iter().any(|have| have == note) {
+        return;
+    }
+    notebook.notes.push(note.to_string());
+}
+
+enum PageFit {
+    Added,
+    Present,
+    TooBig,
+}
+
+fn append_page(notebook: &mut PageNotebook, index: &super::index::PageIndex) -> PageFit {
+    let mut block = String::new();
+    let mut spans = Vec::new();
+    for span in &index.spans {
+        if notebook.spans.iter().any(|have| have.id == span.id) {
+            continue;
+        }
+        let piece = format!("[{} page {} {}]\n{}", span.id, span.page + 1, span.kind.as_str(), span.text.trim());
+        if !block.is_empty() {
+            block.push_str("\n\n");
+        }
+        block.push_str(&piece);
+        spans.push(span.clone());
+    }
+    if spans.is_empty() {
+        return PageFit::Present;
+    }
+    let extra = if notebook.text.is_empty() { 0 } else { 2 };
+    if notebook.text.len().saturating_add(extra).saturating_add(block.len()) > MAX_TEXT_BYTES {
+        return PageFit::TooBig;
+    }
+    if extra == 2 {
+        notebook.text.push_str("\n\n");
+    }
+    notebook.text.push_str(&block);
+    notebook.spans.extend(spans);
+    PageFit::Added
+}
+
+/// Read whole pages into `notebook`. Pages that do not fit, or are outside the document, are named
+/// in the returned note instead of being dropped quietly.
+fn read_into(notebook: &mut PageNotebook, source: &ExportSource, outline: &[OutlineEntry], pages: &[usize], limited: bool) -> Option<String> {
+    let marks = structure_marks(source);
+    let mut added = Vec::new();
+    let mut unread = Vec::new();
+    let mut missing = Vec::new();
+    let mut empty = Vec::new();
+    let mut failed = Vec::new();
+    let mut incomplete = Vec::new();
+    let mut stop_for_size = false;
+    for page in pages {
+        if stop_for_size {
+            unread.push(*page);
+            continue;
+        }
+        if *page == 0 || *page > source.pages {
+            missing.push(*page);
+            continue;
+        }
+        let zero = page - 1;
+        if notebook.loaded.contains(&zero) {
+            continue;
+        }
+        let index = match page_index(source, zero, outline, &marks) {
+            Ok(index) => index,
+            Err(_) => {
+                failed.push(*page);
+                continue;
+            }
+        };
+        if index.truncated {
+            incomplete.push(*page);
+            notebook.loaded.push(zero);
+            continue;
+        }
+        if index.spans.is_empty() {
+            empty.push(*page);
+            notebook.loaded.push(zero);
+            continue;
+        }
+        match append_page(notebook, &index) {
+            PageFit::Added => {
+                notebook.loaded.push(zero);
+                added.push(*page);
+            }
+            PageFit::Present => notebook.loaded.push(zero),
+            PageFit::TooBig => {
+                unread.push(*page);
+                stop_for_size = true;
+            }
+        }
+    }
+    let mut note = String::new();
+    if limited {
+        note.push_str("Only the first 100 pages of that request were considered.");
+    }
+    push_page_note(&mut note, &missing, "is outside this document", "are outside this document");
+    push_page_note(&mut note, &unread, "did not fit and was not read", "did not fit and were not read");
+    push_page_note(&mut note, &empty, "has no extractable text", "have no extractable text");
+    push_page_note(&mut note, &incomplete, "was incomplete and was left out", "were incomplete and were left out");
+    push_page_note(&mut note, &failed, "could not be read", "could not be read");
+    if added.is_empty() && note.is_empty() && !pages.is_empty() && pages.iter().all(|page| *page >= 1 && *page <= source.pages) {
+        note.push_str("Those pages are already in the conversation.");
+    }
+    if !note.is_empty() {
+        remember_note(notebook, &note);
+    }
+    if added.is_empty() { None } else { Some(format!("Reading {}", format_pages(&added))) }
+}
+
+fn push_page_note(note: &mut String, pages: &[usize], one: &str, many: &str) {
+    if pages.is_empty() {
+        return;
+    }
+    if !note.is_empty() {
+        note.push(' ');
+    }
+    let label = format_pages(pages);
+    let verb = if pages.len() == 1 { one } else { many };
+    note.push_str(&format!("{label} {verb}."));
+}
+
+fn draw_into(notebook: &mut PageNotebook, source: &ExportSource, pages: &[usize]) -> (Option<String>, Option<String>) {
+    let mut drew = Vec::new();
+    let mut skipped = Vec::new();
+    let mut added_now = 0usize;
+    for page in pages {
+        if *page == 0 || *page > source.pages {
+            continue;
+        }
+        let zero = page - 1;
+        if notebook.image_pages.contains(&zero) {
+            continue;
+        }
+        if added_now >= MAX_CHAT_IMAGES_PER_TURN || notebook.images.len() >= MAX_CHAT_IMAGES {
+            skipped.push(*page);
+            continue;
+        }
+        match raster(source, zero, None) {
+            Ok(Some(image)) => {
+                notebook.images.push(image);
+                notebook.image_pages.push(zero);
+                drew.push(*page);
+                added_now = added_now.saturating_add(1);
+            }
+            _ => skipped.push(*page),
+        }
+    }
+    let activity = if drew.is_empty() { None } else { Some(format!("Drawing {}", format_pages(&drew))) };
+    if drew.is_empty() && skipped.is_empty() {
+        return (activity, None);
+    }
+    let mut note = String::new();
+    if !drew.is_empty() {
+        note.push_str(&format!("Drew {}.", format_pages(&drew)));
+    }
+    if !skipped.is_empty() {
+        if !note.is_empty() {
+            note.push(' ');
+        }
+        note.push_str(&format!(
+            "Did not draw {} because only {MAX_CHAT_IMAGES_PER_TURN} images fit in one reply and {MAX_CHAT_IMAGES} in the conversation.",
+            format_pages(&skipped)
+        ));
+    }
+    (activity, Some(note))
+}
+
+fn compose_evidence(notebook: &PageNotebook, pack: &EvidencePack, answer_now: bool) -> EvidencePack {
+    if notebook.text.is_empty() && notebook.notes.is_empty() && !answer_now {
+        return pack.clone();
+    }
+    let mut text = String::new();
+    if !notebook.text.is_empty() {
+        text.push_str("Pages read for this conversation:\n\n");
+        text.push_str(&notebook.text);
+    }
+    for note in &notebook.notes {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(note);
+    }
+    let mut spans = notebook.spans.clone();
+    let room = text.len().saturating_add(pack.text.len()).saturating_add(32) <= MAX_TEXT_BYTES.saturating_add(512);
+    if !pack.text.is_empty() && (text.is_empty() || room) {
+        if !text.is_empty() {
+            text.push_str("\n\nOther retrieved passages:\n\n");
+        }
+        text.push_str(&pack.text);
+        for span in &pack.spans {
+            if spans.iter().all(|have| have.id != span.id) {
+                spans.push(span.clone());
+            }
+        }
+    }
+    if answer_now {
+        text.push_str("\n\nAnswer now from the pages already read. Do not request more pages.");
+    }
+    let mut pages: Vec<usize> = spans.iter().map(|span| span.page + 1).collect();
+    pages.sort_unstable();
+    pages.dedup();
+    EvidencePack { text, pages, spans, activities: pack.activities.clone(), notes: pack.notes.clone() }
+}
+
+fn evidence_images(notebook: &PageNotebook, extra: &[ChatImage]) -> Vec<ChatImage> {
+    let mut images = notebook.images.clone();
+    for image in extra {
+        if images.len() >= MAX_CHAT_IMAGES {
+            break;
+        }
+        images.push(image.clone());
+    }
+    images
+}
+
+fn finish(answer: AgentAnswer, notebook: &PageNotebook, pack: &EvidencePack) -> AgentAnswer {
+    let mut answer = answer;
+    answer.notebook = notebook.clone();
+    answer.activities.extend(pack.activities.iter().cloned());
+    answer
+}
+
+/// Run the provider against evidence already gathered. A page tool reads or draws those pages
+/// into `notebook`, which the caller keeps for the next message. `on_partial` receives the
+/// visible answer while a streamed reply is still arriving; it is not called when streaming is off.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)] // provider, evidence, conversation, and the callbacks are all required
+#[allow(clippy::too_many_arguments)] // provider, evidence, the notebook, and the callbacks are all required
 pub fn complete_evidence<F, G, H>(
     provider: &mut crate::ai::OpenAiProvider,
+    source: &ExportSource,
+    outline: &[OutlineEntry],
     pack: EvidencePack,
+    notebook: &mut PageNotebook,
     task: Task,
     starter: &str,
     turns: &[Turn],
     images: &[ChatImage],
-    mut more: G,
+    image_block: Option<&str>,
+    mut search: G,
     mut report: F,
     mut on_partial: H,
 ) -> Result<AgentAnswer, String>
@@ -572,39 +1083,96 @@ where
         return Err("The last message must be the new user turn.".into());
     }
     let mut pack = pack;
-    let images = images.to_vec();
     for activity in &pack.activities {
         report(activity);
     }
-    let mut last = AgentAnswer {
-        answer: String::new(),
-        citations: Vec::new(),
-        actions: Vec::new(),
-        follow_ups: Vec::new(),
-        notes: Vec::new(),
-        activities: pack.activities.clone(),
-    };
-    for round in 0..3 {
+    let question = turns
+        .iter()
+        .rev()
+        .find(|turn| turn.role == Role::User)
+        .map(|turn| turn.text.as_str())
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or(starter);
+    let (named, limited) = pages_named_in(question);
+    if !named.is_empty()
+        && let Some(activity) = read_into(notebook, source, outline, &named, limited)
+    {
+        report(&activity);
+    }
+    let mut tool_calls = 0usize;
+    for round in 0..5 {
+        let answer_now = tool_calls >= 3;
         report("Preparing response");
-        let messages = evidence_messages(&pack, task, starter, turns, &images)?;
+        let evidence = compose_evidence(notebook, &pack, answer_now);
+        let messages = evidence_messages(&evidence, task, starter, turns, &evidence_images(notebook, images))?;
         let raw = super::complete_messages_reporting(provider, &messages, super::StreamKind::Answer, &mut on_partial)?;
-        let answer = verify_reply(&raw, &pack);
+        if let Some(tool) = asked_tool(&raw) {
+            if answer_now {
+                let mut answer = verify_reply("", &evidence);
+                answer.answer = "Ask again for any pages that were not read.".into();
+                answer.notes.push("Ask again for any pages that were not read.".into());
+                return Ok(finish(answer, notebook, &pack));
+            }
+            tool_calls = tool_calls.saturating_add(1);
+            apply_tool(notebook, source, outline, tool, image_block, &mut report);
+            continue;
+        }
+        let answer = verify_reply(&raw, &evidence);
         for activity in &answer.activities {
             report(activity);
         }
-        if round < 2
+        if round < 4
             && let Some(query) = needs_search(&answer)
         {
             let query = query.to_string();
             report(&format!("Searching for {query}"));
-            pack = more(&query)?;
+            pack = search(&query)?;
             continue;
         }
-        last = answer;
-        last.activities.extend(pack.activities.iter().cloned());
-        break;
+        return Ok(finish(answer, notebook, &pack));
     }
-    Ok(last)
+    Err("The assistant did not answer.".into())
+}
+
+fn apply_tool<F>(
+    notebook: &mut PageNotebook,
+    source: &ExportSource,
+    outline: &[OutlineEntry],
+    tool: AskedTool,
+    image_block: Option<&str>,
+    report: &mut F,
+) where
+    F: FnMut(&str),
+{
+    let (pages, limited, draw) = match tool {
+        AskedTool::Text { pages, limited } => (pages, limited, false),
+        AskedTool::Image { pages, limited } => (pages, limited, true),
+        AskedTool::Unknown => {
+            remember_note(notebook, "That tool is not available. Use get_pdf_page_text or get_pdf_page_img.");
+            return;
+        }
+    };
+    if pages.is_empty() {
+        remember_note(notebook, "Name one or more pages, such as 348-373.");
+        return;
+    }
+    if let Some(activity) = read_into(notebook, source, outline, &pages, limited) {
+        report(&activity);
+    }
+    if !draw {
+        return;
+    }
+    if let Some(reason) = image_block {
+        remember_note(notebook, reason);
+        return;
+    }
+    let (activity, note) = draw_into(notebook, source, &pages);
+    if let Some(activity) = activity {
+        report(&activity);
+    }
+    if let Some(note) = note {
+        remember_note(notebook, &note);
+    }
 }
 
 /// Build evidence and optional page images from a document export. Checks must already have passed.
@@ -758,5 +1326,100 @@ mod tests {
         let (_pack, images, note) = prepare_pack(&source, &outline, &request, &skipped).unwrap();
         assert!(images.is_empty());
         assert!(note.unwrap().contains("not marked"));
+    }
+
+    fn indexed(page: usize, text: &str) -> super::super::index::PageIndex {
+        super::super::index::PageIndex { page, truncated: false, spans: vec![span(&format!("p{page}"), page, text)] }
+    }
+
+    #[test]
+    fn page_ranges_are_read_from_a_question_and_a_tool_argument() {
+        let (pages, limited) = pages_named_in("Analyze pages 348 to 373 and explain the design algorithm");
+        assert_eq!(pages, (348..=373).collect::<Vec<_>>());
+        assert!(!limited);
+        assert_eq!(parse_page_spec("348-373").0, pages);
+        assert_eq!(parse_page_spec("348–373").0, pages);
+        assert_eq!(parse_page_spec("348, 360").0, vec![348, 360]);
+        assert_eq!(pages_named_in("Also look at pages 12-15").0, vec![12, 13, 14, 15]);
+        assert_eq!(pages_named_in("page 12 and pages 1 and 4").0, vec![12, 1, 4]);
+        assert!(pages_named_in("explain the design algorithm considerations").0.is_empty());
+        let (capped, limited) = parse_page_spec("1-500");
+        assert_eq!(capped.len(), MAX_PAGES);
+        assert!(limited);
+        assert_eq!(visible_stream_text(r#"{"tool":"get_pdf_page_text","pages":"1-2"}"#), "");
+        assert!(asked_tool(r#"{"tool":"get_pdf_page_text","pages":"1-2"}"#).is_some());
+        assert!(asked_tool(r#"{"tool":"get_pdf_page_img","pages":[1,2]}"#).is_some());
+        assert!(asked_tool(r#"{"answer":"done","tool":"get_pdf_page_text","pages":"1"}"#).is_none());
+    }
+
+    #[test]
+    fn a_page_that_does_not_fit_is_named_and_not_dropped_quietly() {
+        let mut notebook = PageNotebook::default();
+        let big = "x".repeat(MAX_TEXT_BYTES / 2 + 8);
+        assert!(matches!(append_page(&mut notebook, &indexed(0, &big)), PageFit::Added));
+        assert!(matches!(append_page(&mut notebook, &indexed(1, &big)), PageFit::TooBig));
+        assert_eq!(notebook.spans.len(), 1);
+        assert!(notebook.text.contains(&big));
+        let mut full = PageNotebook::default();
+        assert!(matches!(append_page(&mut full, &indexed(5, &"y".repeat(MAX_TEXT_BYTES - 32))), PageFit::Added));
+        let mut session = crate::Session::new();
+        let id = session.open("Pages", None, std::sync::Arc::new(crate::tests::fixture(1)), None).unwrap();
+        let document = session.get(id).unwrap();
+        let mut source = document.export_source();
+        source.config.system_fonts = false;
+        let outline = super::super::index::flatten_outline(&document.info.outline);
+        assert!(read_into(&mut full, &source, &outline, &[1], false).is_none());
+        assert!(full.notes.iter().any(|note| note.contains("did not fit")), "{:?}", full.notes);
+        assert!(!full.text.contains("Page 1"), "{}", full.text);
+    }
+
+    #[test]
+    fn named_pages_stay_available_and_a_missing_page_is_a_note() {
+        let mut session = crate::Session::new();
+        let id = session.open("Pages", None, std::sync::Arc::new(crate::tests::fixture(2)), None).unwrap();
+        let document = session.get(id).unwrap();
+        let mut source = document.export_source();
+        source.config.system_fonts = false;
+        let outline = super::super::index::flatten_outline(&document.info.outline);
+        let mut notebook = PageNotebook::default();
+        let activity = read_into(&mut notebook, &source, &outline, &[1, 2, 9], false).unwrap();
+        assert!(activity.contains('1'), "{activity}");
+        assert!(notebook.text.contains("Page 1"), "{}", notebook.text);
+        assert!(notebook.text.contains("Page 2"), "{}", notebook.text);
+        assert!(notebook.notes.iter().any(|note| note.contains("outside")), "{:?}", notebook.notes);
+        assert!(read_into(&mut notebook, &source, &outline, &[1], false).is_none());
+        assert!(notebook.notes.iter().any(|note| note.contains("already")), "{:?}", notebook.notes);
+        let pack = EvidencePack { text: "keyword hit".into(), pages: vec![], spans: vec![], activities: vec![], notes: vec![] };
+        let evidence = compose_evidence(&notebook, &pack, false);
+        let turns = vec![Turn { role: Role::User, text: "What does the first page say?".into(), images: Vec::new(), citations: Vec::new() }];
+        let messages = evidence_messages(&evidence, Task::Ask, "Explain the design.", &turns, &[]).unwrap();
+        assert!(messages[1].text.contains("Page 1"));
+        assert!(messages[1].text.contains("Pages read"));
+    }
+
+    #[test]
+    fn an_image_tool_draws_when_allowed_and_sends_text_when_it_is_not() {
+        let mut session = crate::Session::new();
+        let id = session.open("Pages", None, std::sync::Arc::new(crate::tests::fixture(1)), None).unwrap();
+        let document = session.get(id).unwrap();
+        let mut source = document.export_source();
+        source.config.system_fonts = false;
+        let outline = super::super::index::flatten_outline(&document.info.outline);
+        let mut blocked = PageNotebook::default();
+        apply_tool(
+            &mut blocked,
+            &source,
+            &outline,
+            AskedTool::Image { pages: vec![1], limited: false },
+            Some("Page images are off. The text of those pages is included instead."),
+            &mut |_| {},
+        );
+        assert!(blocked.images.is_empty());
+        assert!(blocked.text.contains("Page 1"), "{}", blocked.text);
+        assert!(blocked.notes.iter().any(|note| note.contains("off")), "{:?}", blocked.notes);
+        let mut allowed = PageNotebook::default();
+        apply_tool(&mut allowed, &source, &outline, AskedTool::Image { pages: vec![1], limited: false }, None, &mut |_| {});
+        assert_eq!(allowed.images.len(), 1);
+        assert!(allowed.text.contains("Page 1"), "{}", allowed.text);
     }
 }

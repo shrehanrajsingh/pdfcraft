@@ -51,7 +51,13 @@ a loopback server may itself forward to another service. The assistant never edi
   need the desktop app.
 - At most 100 pages and 120,000 UTF-8 bytes per request, with no silent truncation. The UI offers
   the document or current page; automation also accepts an explicit list of pages. Ask and
-  Summarize send retrieved spans, not a silent dump of every page. Scans need OCR
+  Summarize send retrieved spans, not a silent dump of every page. Naming pages in the question,
+  such as "pages 348 to 373", reads those pages in full before the model answers. The model can
+  also reply with `get_pdf_page_text` or `get_pdf_page_img` to read or draw more pages. Pages that
+  do not fit, or are outside the document, are named in a note and are not dropped quietly. Page
+  images still require **Send PDF page images** and **This model accepts images**; otherwise the
+  image tool sends the page text and says why. Pages read this way stay in the conversation until
+  **New conversation**. Scans need OCR
   first. Extracted page text is sent, plus any pictures you attach or paste in the chat (not PDF
   bytes or other attachments). **Send PDF page images** (Preferences, and only when **This model
   accepts images** is on) also sends a downscaled render of a page or selected region when the
@@ -72,8 +78,9 @@ a loopback server may itself forward to another service. The assistant never edi
   from the model. A page with no glyph boxes is marked page-level. Translation produces text, not
   a translated PDF, and its page markers are not checked.
 - Follow-up turns for Ask and Summarize retrieve again (at most 24 turns and 32,000 UTF-8 bytes of
-  history on top of the evidence). One Send may run up to three provider rounds when the model
-  asks for another search. Translate follow-ups reuse the previewed snapshot. Over those limits,
+  history on top of the evidence) and still include pages already read. One Send may run up to five
+  provider rounds: three page or search requests, then an answer. Translate follow-ups reuse the
+  previewed snapshot. Over those limits,
   start a new conversation; nothing is truncated silently. History is session-only and is not
   written to preferences. Layout without structure tags is line and paragraph geometry. Math is
   the extracted characters, or a crop when page images are on.
